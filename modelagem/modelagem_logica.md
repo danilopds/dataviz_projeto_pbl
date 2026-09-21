@@ -1,4 +1,4 @@
-# Modelagem Lógica de Dados (Relacional)
+# Modelagem Lógica de Dados 
 
 > **Projeto do Módulo PBL — Repositório GitLab & Quadro Kanban**
 > Instituto Ápice · Turma T28 · Ciclo 2026-1b · Extraído em 2026-08-29
