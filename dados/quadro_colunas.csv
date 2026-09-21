@@ -1,0 +1,13 @@
+grupo,quadro,posicao,coluna
+G01,Scrum Board,0,Backlog
+G01,Scrum Board,1,Doing
+G01,Scrum Board,2,Waiting Review
+G01,Scrum Board,3,Review
+G02,Scrum Board,0,Backlog
+G02,Scrum Board,1,Doing
+G02,Scrum Board,2,Waiting Review
+G02,Scrum Board,3,Review
+G03,Scrum Board,0,Backlog
+G03,Scrum Board,1,Doing
+G03,Scrum Board,2,Waiting Review
+G03,Scrum Board,3,Review

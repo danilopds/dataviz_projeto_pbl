@@ -1,0 +1,25 @@
+{
+  "conjunto": "Projeto do módulo — rastro de trabalho PBL",
+  "instituicao": "Instituto Ápice",
+  "observacao": "Dados reais de projetos acadêmicos, pseudonimizados. Instituição, pessoas e endereços foram substituídos.",
+  "turma": "T28",
+  "grupos": [
+    "G01",
+    "G02",
+    "G03"
+  ],
+  "ciclo": "2026-1b",
+  "extraido_em": "2026-08-29T14:38:25.714550+00:00",
+  "recorte": "repositorios de grupo PBL: graduacao/<ciclo>/<turma>/<grupo>; canal de estado (API REST) + movimento de cartao (resource_label_events); sem diff por commit e sem comentarios",
+  "pessoas_pseudonimizadas": 83,
+  "arquivos": {
+    "grupos.csv": 3,
+    "pessoas.csv": 83,
+    "sprints.csv": 15,
+    "quadro_colunas.csv": 12,
+    "commits.csv": 2688,
+    "merge_requests.csv": 540,
+    "cartoes.csv": 1238,
+    "kanban_eventos.csv": 13194
+  }
+}

@@ -1,0 +1,16 @@
+grupo,sprint,situacao,inicio_em,prazo_em
+G01,Sprint 01,active,,
+G01,Sprint 02,active,,
+G01,Sprint 03,active,,
+G01,Sprint 04,active,,
+G01,Sprint 05,active,,
+G02,Sprint 01,active,,
+G02,Sprint 02,active,,
+G02,Sprint 03,active,,
+G02,Sprint 04,active,,
+G02,Sprint 05,active,,
+G03,Sprint 01,active,2026-04-22,2026-05-01
+G03,Sprint 02,active,2026-05-04,2026-05-16
+G03,Sprint 03,active,2026-05-18,2026-05-30
+G03,Sprint 04,active,2026-06-01,2026-06-12
+G03,Sprint 05,active,2026-06-15,2026-06-26
