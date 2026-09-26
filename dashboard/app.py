@@ -320,7 +320,7 @@ with tab_over:
                 f"{row['sprint']}: {pct}% dos commits nos 2 últimos dias "
                 f"({int(row['fim'])}/{int(row['total'])}) — {detalhe}")))
     temas.append({
-        "nome": "Ritmo", "marker": "⏱️ Ritmo",
+        "marker": "⏱️ Ritmo",
         "resumo": (f"{len(exce_ritmo)} de {n_sprints_alerta} {pal_sprint} "
                    "com véspera ou próxima do limiar" if exce_ritmo
                    else f"{n_sprints_alerta} {pal_sprint} com ritmo saudável"),
@@ -344,7 +344,7 @@ with tab_over:
     n_grupos_alerta = len(conc_df)
     pal_grupo = "grupo" if n_grupos_alerta == 1 else "grupos"
     temas.append({
-        "nome": "Carga", "marker": "👥 Carga",
+        "marker": "👥 Carga",
         "resumo": (f"{len(exce_carga)} de {n_grupos_alerta} {pal_grupo} com "
                    "carga concentrada" if exce_carga
                    else f"{n_grupos_alerta} {pal_grupo} com carga equilibrada"),
@@ -367,7 +367,7 @@ with tab_over:
     n_grupos_review = len(review_df)
     pal_grupo_review = ("grupo" if n_grupos_review == 1 else "grupos")
     temas.append({
-        "nome": "Review", "marker": "🔍 Review",
+        "marker": "🔍 Review",
         "resumo": (f"{len(exce_review)} de {n_grupos_review} "
                    f"{pal_grupo_review} em atenção na revisão" if exce_review
                    else f"{n_grupos_review} {pal_grupo_review} com revisão "
@@ -382,7 +382,7 @@ with tab_over:
                  else "warn" if abs(corr) < LIM_CORR else "ok")
         saudavel = nivel == "ok"
         temas.append({
-            "nome": "Quadro × Repo", "marker": "🧩 Quadro × Repo",
+            "marker": "🧩 Quadro × Repo",
             "resumo": (f"correlação commits × cartões fechados = {corr} — "
                        + ("quadro reflete o repositório" if saudavel
                           else "divergência quadro/repositório")),
@@ -394,7 +394,7 @@ with tab_over:
                     "pelo menos 3 sprints no recorte."})
     else:
         temas.append({
-            "nome": "Quadro × Repo", "marker": "🧩 Quadro × Repo",
+            "marker": "🧩 Quadro × Repo",
             "icon": "⚪",
             "resumo": "sem dados suficientes para correlacionar",
             "excecoes": [],
@@ -410,7 +410,7 @@ with tab_over:
                 or (ICONES["bad"] if any(n == "bad" for n, _, _ in exce)
                     else ICONES["warn"] if exce else ICONES["ok"]))
         st.markdown(f"#### {tema['marker']}")
-        st.markdown(f"#### {icon} {tema['nome']} — {tema['resumo']}")
+        st.markdown(f"#### {icon} {tema['resumo']}")
         if tema.get("nota"):
             st.caption(tema["nota"])
         ultimo_grupo = None
