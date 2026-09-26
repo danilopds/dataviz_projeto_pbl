@@ -86,16 +86,20 @@ sem_sprint = st.sidebar.checkbox(
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Limiares de alerta")
+st.sidebar.caption("⏱️ Ritmo")
 LIM_CRUNCH = st.sidebar.slider(
-    "% de commits nos 2 últimos dias da sprint (crunch)", 5, 80, 35)
+    "% de commits nos 2 últimos dias da sprint (véspera)", 5, 80, 35)
+st.sidebar.caption("👥 Carga")
 LIM_TOP1 = st.sidebar.slider(
     "% de commits da pessoa mais ativa", 20, 90, 45)
 LIM_GINI = st.sidebar.slider(
     "Índice de Gini da distribuição de commits", 0.20, 0.90, 0.55)
+st.sidebar.caption("🔍 Review")
 LIM_REVIEW = st.sidebar.slider(
     "Mediana de horas para merge", 12, 240, 72)
 LIM_SEM_COMENT = st.sidebar.slider(
     "% de MRs mesclados sem comentários", 10, 90, 40)
+st.sidebar.caption("🧩 Quadro × Repo")
 LIM_CORR = st.sidebar.slider(
     "Correlação quadro × repositório mínima", 0.0, 1.0, 0.5)
 
@@ -239,6 +243,7 @@ with tab_over:
         LEFT JOIN dim_pessoa p ON p.sk_pessoa = f.sk_autor
         WHERE {grupos_cond}
           AND coalesce(p.eh_placeholder, 0) = 0
+          AND {sprint_cond('f.sk_sprint_commitado')}
         GROUP BY f.grupo, pessoa
     """)
     conc_df = carga_df.groupby("grupo").agg(
@@ -259,6 +264,7 @@ with tab_over:
                    WHERE situacao = 'merged') AS mediana_h
         FROM fato_merge_requests f
         WHERE {grupos_cond}
+          AND {sprint_cond('f.sk_sprint')}
         GROUP BY f.grupo
         ORDER BY f.grupo
     """)
@@ -271,14 +277,15 @@ with tab_over:
             SELECT f.grupo, f.sk_sprint_commitado AS sk_sprint,
                    count(*) AS commits
             FROM fato_commits f
-            WHERE {grupos_cond} AND f.sk_sprint_commitado IS NOT NULL
+            WHERE {grupos_cond}
+              AND f.sk_sprint_commitado IN ({sk_in})
             GROUP BY 1, 2
         ),
         cartoes_sprint AS (
             SELECT f.grupo, f.sk_sprint, count(*) AS fechados
             FROM fato_cartoes f
             WHERE {grupos_cond} AND f.situacao = 'closed'
-              AND f.sk_sprint IS NOT NULL
+              AND f.sk_sprint IN ({sk_in})
             GROUP BY 1, 2
         )
         SELECT coalesce(c.grupo, k.grupo) AS grupo,
@@ -297,6 +304,8 @@ with tab_over:
         corr = None
 
     temas: list[dict] = []
+    n_sprints_alerta = len(crunch_df)
+    pal_sprint = "sprint" if n_sprints_alerta == 1 else "sprints"
 
     # Ritmo — exceções por sprint (renderizadas agrupadas por grupo)
     exce_ritmo: list[tuple[str, str, str]] = []
@@ -311,11 +320,14 @@ with tab_over:
                 f"{row['sprint']}: {pct}% dos commits nos 2 últimos dias "
                 f"({int(row['fim'])}/{int(row['total'])}) — {detalhe}")))
     temas.append({
-        "nome": "Ritmo",
-        "resumo": (f"{len(exce_ritmo)} de {len(crunch_df)} sprints com véspera "
-                   "ou próxima do limiar" if exce_ritmo
-                   else f"{len(crunch_df)} sprints com ritmo saudável"),
-        "excecoes": exce_ritmo, "agrupar": True})
+        "nome": "Ritmo", "marker": "⏱️ Ritmo",
+        "resumo": (f"{len(exce_ritmo)} de {n_sprints_alerta} {pal_sprint} "
+                   "com véspera ou próxima do limiar" if exce_ritmo
+                   else f"{n_sprints_alerta} {pal_sprint} com ritmo saudável"),
+        "excecoes": exce_ritmo, "agrupar": True,
+        "nota": "Participação dos 2 últimos dias da sprint (véspera) no total "
+                "de commits; sprints com pelo menos 10 commits, no recorte "
+                "dos filtros."})
 
     # Carga — exceções por grupo
     exce_carga: list[tuple[str, str, str]] = []
@@ -329,12 +341,16 @@ with tab_over:
             exce_carga.append((nivel, row["grupo"], (
                 f"top-1 = {row['pct_top1']}% dos commits "
                 f"(Gini {row['gini']})")))
+    n_grupos_alerta = len(conc_df)
+    pal_grupo = "grupo" if n_grupos_alerta == 1 else "grupos"
     temas.append({
-        "nome": "Carga",
-        "resumo": (f"{len(exce_carga)} de {len(conc_df)} grupos com carga "
-                   "concentrada" if exce_carga
-                   else f"{len(conc_df)} grupos com carga equilibrada"),
-        "excecoes": exce_carga})
+        "nome": "Carga", "marker": "👥 Carga",
+        "resumo": (f"{len(exce_carga)} de {n_grupos_alerta} {pal_grupo} com "
+                   "carga concentrada" if exce_carga
+                   else f"{n_grupos_alerta} {pal_grupo} com carga equilibrada"),
+        "excecoes": exce_carga,
+        "nota": "Distribuição de commits por membro do grupo, no recorte dos "
+                "filtros; exclui placeholders ([bot]/[externo])."})
 
     # Review — exceções por grupo
     exce_review: list[tuple[str, str, str]] = []
@@ -348,12 +364,17 @@ with tab_over:
             exce_review.append((nivel, row["grupo"], (
                 f"mediana p/ merge {fmt_horas(row['mediana_h'])}; "
                 f"{row['pct_sem_coment']}% sem comentários")))
+    n_grupos_review = len(review_df)
+    pal_grupo_review = ("grupo" if n_grupos_review == 1 else "grupos")
     temas.append({
-        "nome": "Review",
-        "resumo": (f"{len(exce_review)} de {len(review_df)} grupos em atenção "
-                   "na revisão" if exce_review
-                   else f"{len(review_df)} grupos com revisão saudável"),
-        "excecoes": exce_review})
+        "nome": "Review", "marker": "🔍 Review",
+        "resumo": (f"{len(exce_review)} de {n_grupos_review} "
+                   f"{pal_grupo_review} em atenção na revisão" if exce_review
+                   else f"{n_grupos_review} {pal_grupo_review} com revisão "
+                        "saudável"),
+        "excecoes": exce_review,
+        "nota": "Sobre MRs mesclados: mediana de horas da abertura ao merge e "
+                "% de MRs sem nenhum comentário, no recorte dos filtros."})
 
     # Quadro × Repo — correlação global
     if corr is not None:
@@ -361,26 +382,37 @@ with tab_over:
                  else "warn" if abs(corr) < LIM_CORR else "ok")
         saudavel = nivel == "ok"
         temas.append({
-            "nome": "Quadro × Repo",
+            "nome": "Quadro × Repo", "marker": "🧩 Quadro × Repo",
             "resumo": (f"correlação commits × cartões fechados = {corr} — "
                        + ("quadro reflete o repositório" if saudavel
                           else "divergência quadro/repositório")),
             "excecoes": ([] if saudavel else [(nivel, "", (
                 "divergência quadro/repositório — investigar cartões "
-                "empilhados ou commits sem rastreio"))])})
+                "empilhados ou commits sem rastreio"))]),
+            "nota": "Correlação de Pearson entre commits e cartões fechados "
+                    "por sprint, apenas nas sprints selecionadas; exige "
+                    "pelo menos 3 sprints no recorte."})
     else:
         temas.append({
-            "nome": "Quadro × Repo",
+            "nome": "Quadro × Repo", "marker": "🧩 Quadro × Repo",
+            "icon": "⚪",
             "resumo": "sem dados suficientes para correlacionar",
-            "excecoes": []})
+            "excecoes": [],
+            "nota": "Correlação de Pearson entre commits e cartões fechados "
+                    "por sprint, apenas nas sprints selecionadas; exige "
+                    "pelo menos 3 sprints no recorte."})
 
     ICONES = {"bad": "🔴", "warn": "🟡", "ok": "🟢"}
     separar_grupos = len(grupos_sel) > 1
     for tema in temas:
         exce = tema["excecoes"]
-        icon = (ICONES["bad"] if any(n == "bad" for n, _, _ in exce)
-                else ICONES["warn"] if exce else ICONES["ok"])
+        icon = (tema.get("icon")
+                or (ICONES["bad"] if any(n == "bad" for n, _, _ in exce)
+                    else ICONES["warn"] if exce else ICONES["ok"]))
+        st.markdown(f"#### {tema['marker']}")
         st.markdown(f"#### {icon} {tema['nome']} — {tema['resumo']}")
+        if tema.get("nota"):
+            st.caption(tema["nota"])
         ultimo_grupo = None
         for nivel, grupo, msg in exce:
             cor = "red" if nivel == "bad" else "orange"
@@ -749,7 +781,8 @@ with tab_quadro:
                    count(DISTINCT f.sk_autor) AS dev_ativos
             FROM fato_commits f
             LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_commitado
-            WHERE {grupos_cond} AND f.sk_sprint_commitado IS NOT NULL
+            WHERE {grupos_cond}
+              AND f.sk_sprint_commitado IN ({sk_in})
             GROUP BY 1, 2, 3
         ),
         cartoes_sprint AS (
@@ -759,18 +792,21 @@ with tab_quadro:
                    coalesce(sum(f.tempo_gasto_s), 0) / 3600.0 AS horas_gastas
             FROM fato_cartoes f
             LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint
-            WHERE {grupos_cond} AND f.sk_sprint IS NOT NULL
-              AND {sprint_cond('f.sk_sprint')}
+            WHERE {grupos_cond}
+              AND f.sk_sprint IN ({sk_in})
             GROUP BY 1, 2, 3
         )
-        SELECT c.grupo, c.sprint, c.commits, c.dev_ativos,
+        SELECT coalesce(c.grupo, k.grupo) AS grupo,
+               coalesce(c.sprint, k.sprint) AS sprint,
+               coalesce(c.commits, 0) AS commits,
+               coalesce(c.dev_ativos, 0) AS dev_ativos,
                coalesce(k.cartoes_criados, 0) AS cartoes_criados,
                coalesce(k.cartoes_fechados, 0) AS cartoes_fechados,
                coalesce(k.horas_gastas, 0) AS horas_gastas
         FROM commits_sprint c
-        LEFT JOIN cartoes_sprint k
+        FULL OUTER JOIN cartoes_sprint k
           ON k.grupo = c.grupo AND k.sk_sprint = c.sk_sprint
-        ORDER BY c.grupo, c.sprint
+        ORDER BY 1, 2
     """)
 
     if qxr.empty:
@@ -800,6 +836,8 @@ with tab_quadro:
                 st.success(
                     f"Correlação commits × cartões fechados = **{corr}** "
                     f"— quadro e repositório caminham juntos.")
+        else:
+            st.info("Menos de 3 sprints no recorte — correlação não calculada.")
 
         vinculo = query(f"""
             WITH refs AS (
@@ -844,7 +882,9 @@ with tab_quadro:
             LEFT JOIN dim_sprint s
               ON s.grupo = f.grupo
              AND CAST(f.ocorrido_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
-            WHERE {grupos_cond} AND {sprint_cond('f.sk_data_evento')}
+            WHERE {grupos_cond}
+              AND (s.sk_sprint IN ({sk_in})
+                   {"OR s.sk_sprint IS NULL" if sem_sprint else ""})
             GROUP BY 1, 2, 3
         """)
         eventos["grupo_sprint"] = eventos["grupo"] + " · " + eventos["sprint"].fillna("(fora)")
