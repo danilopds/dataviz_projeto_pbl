@@ -70,14 +70,16 @@ grupos_in = ",".join(f"'{g}'" for g in grupos_sel) or "''"
 sprints_df = query(
     f"SELECT sk_sprint, grupo, sprint, inicio_em, prazo_em FROM dim_sprint "
     f"WHERE grupo IN ({grupos_in}) ORDER BY grupo, sprint")
-sprint_labels = (
-    sprints_df["grupo"] + " · " + sprints_df["sprint"]).tolist()
+sprints_df["label"] = (
+    sprints_df["sprint"] + " · "
+    + sprints_df["inicio_em"].dt.strftime("%d/%m") + "–"
+    + sprints_df["prazo_em"].dt.strftime("%d/%m"))
+sprint_labels = sorted(sprints_df["label"].unique().tolist())
 sprints_sel = st.sidebar.multiselect(
     "Sprints", sprint_labels, default=sprint_labels)
 
 sk_sel = sprints_df.loc[
-    (sprints_df["grupo"] + " · " + sprints_df["sprint"]).isin(sprints_sel),
-    "sk_sprint"].tolist()
+    sprints_df["label"].isin(sprints_sel), "sk_sprint"].tolist()
 sk_in = ",".join(str(int(s)) for s in sk_sel) or "-999"
 sem_sprint = st.sidebar.checkbox(
     "Incluir atividade fora de sprint", value=True)
@@ -112,21 +114,25 @@ def sprint_cond(col: str) -> str:
 # Queries base
 # ---------------------------------------------------------------------------
 kpi_commits = query(f"""
-    SELECT count(*) AS n, coalesce(sum(linhas_total), 0) AS linhas
-    FROM fato_commits f WHERE {grupos_cond}
+    SELECT count(*) FILTER (WHERE coalesce(p.eh_placeholder, 0) = 0) AS membros,
+           count(*) AS total
+    FROM fato_commits f
+    LEFT JOIN dim_pessoa p ON p.sk_pessoa = f.sk_autor
+    WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint_commitado')}
 """)
 
 kpi_mrs = query(f"""
     SELECT count(*) AS n_total,
-           count(*) FILTER (WHERE situacao = 'merged') AS n_merged,
-           coalesce(avg(horas_para_merge) FILTER (WHERE situacao='merged'), 0) AS media_h
-    FROM fato_merge_requests f WHERE {grupos_cond}
+           count(*) FILTER (WHERE situacao = 'merged') AS n_merged
+    FROM fato_merge_requests f
+    WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint')}
 """)
 
 kpi_cartoes = query(f"""
     SELECT count(*) AS n_total,
            count(*) FILTER (WHERE situacao = 'closed') AS n_closed
-    FROM fato_cartoes f WHERE {grupos_cond}
+    FROM fato_cartoes f
+    WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint')}
 """)
 
 kpi_membros = query(f"""
@@ -135,9 +141,17 @@ kpi_membros = query(f"""
     WHERE p.eh_placeholder = 0
       AND p.grupo IN ({grupos_in})
       AND (p.sk_pessoa IN (SELECT DISTINCT sk_autor FROM fato_commits
-                           WHERE grupo IN ({grupos_in}))
+                           WHERE grupo IN ({grupos_in})
+                             AND {sprint_cond('sk_sprint_commitado')})
         OR p.sk_pessoa IN (SELECT DISTINCT sk_autor FROM fato_merge_requests
-                           WHERE grupo IN ({grupos_in})))
+                           WHERE grupo IN ({grupos_in})
+                             AND {sprint_cond('sk_sprint')}))
+""")
+
+kpi_membros_total = query(f"""
+    SELECT count(*) AS n
+    FROM dim_pessoa
+    WHERE eh_placeholder = 0 AND grupo IN ({grupos_in})
 """)
 
 
@@ -149,15 +163,35 @@ st.caption(
     "Ferramenta de apoio ao coordenador: ritmo, carga, revisão e "
     "consistência quadro × repositório.")
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Commits", f"{int(kpi_commits['n'][0]):,}".replace(",", "."),
-          f"{int(kpi_commits['linhas'][0]):,} linhas".replace(",", "."))
-c2.metric("Merge Requests", f"{int(kpi_mrs['n_total'][0])}",
-          f"{int(kpi_mrs['n_merged'][0])} mesclados")
-c3.metric("Cartões Kanban", f"{int(kpi_cartoes['n_total'][0])}",
-          f"{int(kpi_cartoes['n_closed'][0])} fechados")
-c4.metric("Membros ativos", str(int(kpi_membros['n'][0])))
-c5.metric("Sprints no filtro", str(len(sk_sel)))
+c1, c2, c3, c4 = st.columns(4)
+c1.metric(
+    "Commits de membros",
+    f"{int(kpi_commits['membros'][0]):,}".replace(",", "."),
+    f"de {int(kpi_commits['total'][0]):,} no filtro (inclui bots/externos)".replace(
+        ",", "."),
+    delta_color="off",
+    help="Commits de membros cadastrados nos grupos selecionados. "
+         "O total inclui commits de atores não cadastrados "
+         "([bot]/[externo]).")
+c2.metric(
+    "MRs mesclados",
+    f"{int(kpi_mrs['n_merged'][0]):,}".replace(",", "."),
+    f"de {int(kpi_mrs['n_total'][0]):,} MRs no filtro".replace(",", "."),
+    delta_color="off",
+    help="Merge Requests com situação 'merged' dentro dos filtros atuais.")
+c3.metric(
+    "Cartões fechados",
+    f"{int(kpi_cartoes['n_closed'][0]):,}".replace(",", "."),
+    f"de {int(kpi_cartoes['n_total'][0]):,} cartões no filtro".replace(",", "."),
+    delta_color="off",
+    help="Cartões Kanban com situação 'closed' dentro dos filtros atuais.")
+c4.metric(
+    "Membros ativos",
+    str(int(kpi_membros['n'][0])),
+    f"de {int(kpi_membros_total['n'][0])} membros cadastrados",
+    delta_color="off",
+    help="Membros (exceto placeholders) com pelo menos um commit ou MR "
+         "nos filtros atuais.")
 
 tab_over, tab_ritmo, tab_carga, tab_review, tab_quadro = st.tabs(
     ["🏠 Visão geral", "⏱️ Ritmo & Prazos", "👥 Carga de Trabalho",
@@ -169,10 +203,9 @@ tab_over, tab_ritmo, tab_carga, tab_review, tab_quadro = st.tabs(
 with tab_over:
     st.subheader("Sinais de atenção pedagógica")
     st.caption(
-        "Alertas baseados em limiares configuráveis na barra lateral. "
-        "Vermelho = acima do limiar; amarelo = próximo (80% do limiar).")
-
-    alertas: list[dict] = []
+        "Mostra apenas exceções — vermelho = acima do limiar; amarelo = próximo "
+        "(80% do limiar). Itens saudáveis entram só na contagem. "
+        "Limiares configuráveis na barra lateral.")
 
     # Alerta 1 — crunch por grupo (últimos 2 dias da sprint)
     crunch_df = query(f"""
@@ -263,74 +296,126 @@ with tab_over:
     else:
         corr = None
 
+    temas: list[dict] = []
+
+    # Ritmo — exceções por sprint (renderizadas agrupadas por grupo)
+    exce_ritmo: list[tuple[str, str, str]] = []
     for _, row in crunch_df.iterrows():
         pct = row["pct_fim"]
         nivel = ("bad" if pct > LIM_CRUNCH
                  else "warn" if pct > LIM_CRUNCH * 0.8 else "ok")
-        alertas.append({
-            "nivel": nivel, "tema": "Ritmo",
-            "grupo": row["grupo"],
-            "mensagem": (f"{row['sprint']}: {pct}% dos commits nos 2 "
-                         f"últimos dias ({int(row['fim'])}/"
-                         f"{int(row['total'])}) — "
-                         f"{'vespera detectada' if nivel != 'ok' else 'ritmo saudável'}")})
+        if nivel != "ok":
+            detalhe = ("véspera detectada" if nivel == "bad"
+                       else "atenção: próximo do limiar")
+            exce_ritmo.append((nivel, row["grupo"], (
+                f"{row['sprint']}: {pct}% dos commits nos 2 últimos dias "
+                f"({int(row['fim'])}/{int(row['total'])}) — {detalhe}")))
+    temas.append({
+        "nome": "Ritmo",
+        "resumo": (f"{len(exce_ritmo)} de {len(crunch_df)} sprints com véspera "
+                   "ou próxima do limiar" if exce_ritmo
+                   else f"{len(crunch_df)} sprints com ritmo saudável"),
+        "excecoes": exce_ritmo, "agrupar": True})
 
+    # Carga — exceções por grupo
+    exce_carga: list[tuple[str, str, str]] = []
     for _, row in conc_df.iterrows():
         if row["pct_top1"] > LIM_TOP1 or row["gini"] > LIM_GINI:
             nivel = ("bad" if row["pct_top1"] > LIM_TOP1
                      and row["gini"] > LIM_GINI else "warn")
         else:
             nivel = "ok"
-        alertas.append({
-            "nivel": nivel, "tema": "Carga",
-            "grupo": row["grupo"],
-            "mensagem": (f"top-1 = {row['pct_top1']}% dos commits "
-                         f"(Gini {row['gini']}) — "
-                         f"{'concentração' if nivel != 'ok' else 'distribuição equilibrada'}")})
+        if nivel != "ok":
+            exce_carga.append((nivel, row["grupo"], (
+                f"top-1 = {row['pct_top1']}% dos commits "
+                f"(Gini {row['gini']})")))
+    temas.append({
+        "nome": "Carga",
+        "resumo": (f"{len(exce_carga)} de {len(conc_df)} grupos com carga "
+                   "concentrada" if exce_carga
+                   else f"{len(conc_df)} grupos com carga equilibrada"),
+        "excecoes": exce_carga})
 
+    # Review — exceções por grupo
+    exce_review: list[tuple[str, str, str]] = []
     for _, row in review_df.iterrows():
         cond_bad = (row["mediana_h"] > LIM_REVIEW
                     and row["pct_sem_coment"] > LIM_SEM_COMENT)
         cond_warn = (row["mediana_h"] > LIM_REVIEW * 0.8
                      or row["pct_sem_coment"] > LIM_SEM_COMENT * 0.8)
         nivel = "bad" if cond_bad else "warn" if cond_warn else "ok"
-        alertas.append({
-            "nivel": nivel, "tema": "Review",
-            "grupo": row["grupo"],
-            "mensagem": (f"mediana p/ merge {fmt_horas(row['mediana_h'])}; "
-                         f"{row['pct_sem_coment']}% sem comentários")})
+        if nivel != "ok":
+            exce_review.append((nivel, row["grupo"], (
+                f"mediana p/ merge {fmt_horas(row['mediana_h'])}; "
+                f"{row['pct_sem_coment']}% sem comentários")))
+    temas.append({
+        "nome": "Review",
+        "resumo": (f"{len(exce_review)} de {len(review_df)} grupos em atenção "
+                   "na revisão" if exce_review
+                   else f"{len(review_df)} grupos com revisão saudável"),
+        "excecoes": exce_review})
 
+    # Quadro × Repo — correlação global
     if corr is not None:
-        alertas.append({
-            "nivel": ("bad" if abs(corr) < LIM_CORR * 0.5
-                      else "warn" if abs(corr) < LIM_CORR else "ok"),
-            "tema": "Quadro×Repo", "grupo": "—",
-            "mensagem": (f"correlação commits × cartões fechados "
-                         f"por sprint = {corr} — "
-                         f"{'divergência quadro/repositório' if abs(corr) < LIM_CORR else 'quadro reflete o repositório'}")})
+        nivel = ("bad" if abs(corr) < LIM_CORR * 0.5
+                 else "warn" if abs(corr) < LIM_CORR else "ok")
+        saudavel = nivel == "ok"
+        temas.append({
+            "nome": "Quadro × Repo",
+            "resumo": (f"correlação commits × cartões fechados = {corr} — "
+                       + ("quadro reflete o repositório" if saudavel
+                          else "divergência quadro/repositório")),
+            "excecoes": ([] if saudavel else [(nivel, "", (
+                "divergência quadro/repositório — investigar cartões "
+                "empilhados ou commits sem rastreio"))])})
+    else:
+        temas.append({
+            "nome": "Quadro × Repo",
+            "resumo": "sem dados suficientes para correlacionar",
+            "excecoes": []})
 
-    alertas_df = pd.DataFrame(alertas)
     ICONES = {"bad": "🔴", "warn": "🟡", "ok": "🟢"}
-    for tema in ["Ritmo", "Carga", "Review", "Quadro×Repo"]:
-        sub = alertas_df[alertas_df["tema"] == tema]
-        if sub.empty:
-            continue
-        bad = int((sub["nivel"] == "bad").sum())
-        warn = int((sub["nivel"] == "warn").sum())
-        icon = ICONES["bad"] if bad else ICONES["warn"] if warn else ICONES["ok"]
-        st.markdown(f"#### {icon} {tema}")
-        for _, a in sub.iterrows():
-            if a["nivel"] == "ok":
-                st.markdown(f"&nbsp;&nbsp;🟢 `{a['grupo']}` {a['mensagem']}",
+    separar_grupos = len(grupos_sel) > 1
+    for tema in temas:
+        exce = tema["excecoes"]
+        icon = (ICONES["bad"] if any(n == "bad" for n, _, _ in exce)
+                else ICONES["warn"] if exce else ICONES["ok"])
+        st.markdown(f"#### {icon} {tema['nome']} — {tema['resumo']}")
+        ultimo_grupo = None
+        for nivel, grupo, msg in exce:
+            cor = "red" if nivel == "bad" else "orange"
+            if tema.get("agrupar") and separar_grupos:
+                if grupo != ultimo_grupo:
+                    st.markdown(f"&nbsp;&nbsp;**{grupo}**")
+                    ultimo_grupo = grupo
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{ICONES[nivel]} "
+                            f":{cor}[{msg}]", unsafe_allow_html=True)
+            elif tema.get("agrupar"):
+                st.markdown(f"&nbsp;&nbsp;{ICONES[nivel]} "
+                            f":{cor}[{grupo} · {msg}]",
                             unsafe_allow_html=True)
             else:
-                cor = ("red" if a["nivel"] == "bad" else "orange")
-                st.markdown(
-                    f"&nbsp;&nbsp;{ICONES[a['nivel']]} `{a['grupo']}` "
-                    f":{cor}[{a['mensagem']}]", unsafe_allow_html=True)
+                texto = f"{grupo}: {msg}" if grupo else msg
+                st.markdown(f"&nbsp;&nbsp;{ICONES[nivel]} :{cor}[{texto}]",
+                            unsafe_allow_html=True)
 
     st.subheader("Resumo por grupo")
     resumo_df = query(f"""
+        WITH ev AS (
+            SELECT k.grupo, s.sk_sprint, count(*) AS n
+            FROM fato_kanban_eventos k
+            LEFT JOIN dim_sprint s
+              ON s.grupo = k.grupo
+             AND CAST(k.ocorrido_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
+            GROUP BY 1, 2
+        ),
+        ev_filtro AS (
+            SELECT grupo, sum(n) AS eventos
+            FROM ev
+            WHERE sk_sprint IN ({sk_in})
+                  {"OR sk_sprint IS NULL" if sem_sprint else ""}
+            GROUP BY 1
+        )
         SELECT g.grupo,
                (SELECT count(*) FROM fato_commits f
                  WHERE f.grupo = g.grupo
@@ -344,14 +429,19 @@ with tab_over:
                (SELECT count(*) FROM fato_cartoes f
                  WHERE f.grupo = g.grupo AND f.situacao='closed'
                    AND {sprint_cond('f.sk_sprint')}) AS cartoes_fechados,
-               (SELECT count(*) FROM fato_kanban_eventos f
-                 WHERE f.grupo = g.grupo
-                   AND {sprint_cond('f.sk_data_evento')}) AS eventos_kanban
+               coalesce(ev.eventos, 0) AS eventos_quadro
         FROM dim_grupo g
+        LEFT JOIN ev_filtro ev ON ev.grupo = g.grupo
         WHERE g.grupo IN ({grupos_in})
         ORDER BY g.grupo
     """)
-    st.dataframe(resumo_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        resumo_df.rename(columns={
+            "grupo": "Grupo", "commits": "Commits", "mrs": "MRs",
+            "mrs_merged": "MRs mesclados",
+            "cartoes_fechados": "Cartões fechados",
+            "eventos_quadro": "Eventos no quadro"}),
+        use_container_width=True, hide_index=True)
 
 # =========================================================================
 # TAB 1 — RITMO & PRAZOS
