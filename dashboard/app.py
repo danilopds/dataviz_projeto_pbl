@@ -36,7 +36,8 @@ def query(sql: str, **params) -> pd.DataFrame:
 @st.cache_data(ttl=600)
 def grupos_disponiveis() -> list[str]:
     return query(
-        "SELECT grupo FROM dim_grupo ORDER BY grupo").iloc[:, 0].tolist()
+        "SELECT grupo FROM dim_grupo WHERE sk_grupo <> -1 "
+        "ORDER BY grupo").iloc[:, 0].tolist()
 
 
 def gini(series: pd.Series) -> float:
@@ -68,8 +69,8 @@ grupos_sel = st.sidebar.multiselect(
 
 grupos_in = ",".join(f"'{g}'" for g in grupos_sel) or "''"
 sprints_df = query(
-    f"SELECT sk_sprint, grupo, sprint, inicio_em, prazo_em FROM dim_sprint "
-    f"WHERE grupo IN ({grupos_in}) ORDER BY grupo, sprint")
+    "SELECT sk_sprint, sprint, inicio_em, prazo_em FROM dim_sprint "
+    "WHERE sk_sprint <> -1 ORDER BY sk_sprint")
 sprints_df["label"] = (
     sprints_df["sprint"] + " · "
     + sprints_df["inicio_em"].dt.strftime("%d/%m") + "–"
@@ -213,7 +214,7 @@ with tab_over:
 
     # Alerta 1 — crunch por grupo (últimos 2 dias da sprint)
     crunch_df = query(f"""
-        SELECT s.grupo, s.sprint,
+        SELECT f.grupo, s.sprint,
                count(*) AS total,
                count(*) FILTER (
                    WHERE CAST(f.commitado_em AS DATE)
@@ -228,9 +229,9 @@ with tab_over:
           ON s.sk_sprint = f.sk_sprint_commitado
         WHERE {grupos_cond}
           AND {sprint_cond("f.sk_sprint_commitado")}
-        GROUP BY s.grupo, s.sprint
+        GROUP BY f.grupo, s.sprint
         HAVING count(*) >= 10
-        ORDER BY s.grupo, s.sprint
+        ORDER BY f.grupo, s.sprint
     """)
     crunch_df["pct_fim"] = (
         100 * crunch_df["fim"] / crunch_df["total"]).round(1)
@@ -434,11 +435,8 @@ with tab_over:
     st.subheader("Resumo por grupo")
     resumo_df = query(f"""
         WITH ev AS (
-            SELECT k.grupo, s.sk_sprint, count(*) AS n
+            SELECT k.grupo, k.sk_sprint_evento AS sk_sprint, count(*) AS n
             FROM fato_kanban_eventos k
-            LEFT JOIN dim_sprint s
-              ON s.grupo = k.grupo
-             AND CAST(k.ocorrido_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
             GROUP BY 1, 2
         ),
         ev_filtro AS (
@@ -879,12 +877,9 @@ with tab_quadro:
         eventos = query(f"""
             SELECT f.grupo, s.sprint, f.tipo_evento, count(*) AS n
             FROM fato_kanban_eventos f
-            LEFT JOIN dim_sprint s
-              ON s.grupo = f.grupo
-             AND CAST(f.ocorrido_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
+            LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_evento
             WHERE {grupos_cond}
-              AND (s.sk_sprint IN ({sk_in})
-                   {"OR s.sk_sprint IS NULL" if sem_sprint else ""})
+              AND {sprint_cond('f.sk_sprint_evento')}
             GROUP BY 1, 2, 3
         """)
         eventos["grupo_sprint"] = eventos["grupo"] + " · " + eventos["sprint"].fillna("(fora)")

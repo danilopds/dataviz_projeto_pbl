@@ -17,7 +17,7 @@ Os dados reais foram **pseudonimizados** — autores não-membros aparecem como 
 ```
 .
 ├── dados/       # CSVs brutos extraídos (fonte)
-├── relacional/  # CSVs no modelo estrela (fatos e dimensões)
+├── dimensional/ # CSVs no modelo estrela (fatos e dimensões) + gerador
 ├── lakehouse/   # ETL + banco DuckDB (lakehouse/pbl.duckdb)
 ├── dashboard/   # App Streamlit (painel do coordenador)
 └── modelagem/   # Modelagem lógica em Markdown + diagrama (PNG)
@@ -47,16 +47,17 @@ Os dados reais foram **pseudonimizados** — autores não-membros aparecem como 
 
 4. **Carregue os dados:**
 
-   - **Modelo estrela (recomendado):** use os CSVs de `relacional/csv/` — fatos (`fato_commits`, `fato_merge_requests`, `fato_cartoes`, `fato_kanban_eventos`) e dimensões (`dim_pessoa`, `dim_grupo`, `dim_sprint`, `dim_data`, `dim_quadro_coluna`);
-   - **Fonte bruta:** use os CSVs de `dados/` conforme a tabela da modelagem lógica.
+   - **Modelo estrela (recomendado):** use os CSVs de `dimensional/csv/` — fatos (`fato_commits`, `fato_merge_requests`, `fato_cartoes`, `fato_kanban_eventos`) e dimensões (`dim_pessoa`, `dim_grupo`, `dim_sprint`, `dim_data`, `dim_quadro_coluna`). `dim_sprint` e `dim_quadro_coluna` são **conformadas** (sem atributo de grupo): as janelas de data das sprints valem para todos os grupos;
+   - **Fonte bruta:** use os CSVs de `dados/` conforme a tabela da modelagem lógica;
+   - **Regenerar o modelo estrela:** `python dimensional/build_csv.py` recria os CSVs de `dimensional/csv/` a partir de `dados/`.
 
    Exemplo em Python (pandas):
 
    ```python
    import pandas as pd
 
-   fato_commits = pd.read_csv("relacional/csv/fato_commits.csv")
-   dim_pessoa = pd.read_csv("relacional/csv/dim_pessoa.csv")
+   fato_commits = pd.read_csv("dimensional/csv/fato_commits.csv")
+   dim_pessoa = pd.read_csv("dimensional/csv/dim_pessoa.csv")
    ```
 
 5. **Visualize diagramas Mermaid:** o GitHub renderiza Mermaid nativamente nos arquivos `.md`; em editores locais, use a extensão Mermaid do VS Code ou o [Mermaid Live Editor](https://mermaid.live).
@@ -65,7 +66,7 @@ Os dados reais foram **pseudonimizados** — autores não-membros aparecem como 
 
 Painel Streamlit com resumo por grupo, alertas pedagógicos (ritmo/vespera, concentração de carga, code review, consistência quadro × repositório) e drilldown por sprint e pessoa.
 
-1. **Construa o lakehouse DuckDB** a partir dos CSVs de `dados/` (recria `lakehouse/pbl.duckdb`; também replica as janelas de datas de sprint de G03 para G01/G02 para alocar commits por `commitado_em`):
+1. **Construa o lakehouse DuckDB** a partir dos CSVs do modelo estrela em `dimensional/csv/` (recria `lakehouse/pbl.duckdb`; aloca commits e eventos às sprints pelas janelas conformadas de `dim_sprint`, e `sk_sprint = -1` vira `NULL` — fora de sprint — no banco):
 
    ```bash
    python lakehouse/build_lakehouse.py

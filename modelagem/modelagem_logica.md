@@ -254,9 +254,9 @@ Verificação sistemática do modelo contra os CSVs — unicidade, FKs, cardinal
 
 ---
 
-## 8. Modelo dimensional (OLAP) — `relacional/csv`
+## 8. Modelo dimensional (OLAP) — `dimensional/csv`
 
-Star schema gerado a partir de `dados/` para uso analítico (decisões: **surrogate keys inteiros**, multivalorados **mantidos como listas `;`** nas fatos, **dim_data** de calendário, **fatos apenas transacionais** — sem snapshot periódico). Arquivos em `relacional/csv/`, UTF-8, cabeçalho na 1ª linha.
+Star schema gerado a partir de `dados/` para uso analítico (decisões: **surrogate keys inteiros**, multivalorados **mantidos como listas `;`** nas fatos, **dim_data** de calendário, **dimensões conformadas** — `dim_sprint` e `dim_quadro_coluna` sem atributo de grupo, **fatos apenas transacionais** — sem snapshot periódico). Arquivos em `dimensional/csv/`, UTF-8 (BOM), cabeçalho na 1ª linha, campos entre aspas; regeneráveis via [`dimensional/build_csv.py`](../dimensional/build_csv.py).
 
 ```mermaid
 erDiagram
@@ -275,9 +275,12 @@ erDiagram
         int sk_sprint PK
         varchar sprint
         varchar situacao
+        date inicio_em
+        date prazo_em
     }
     DIM_QUADRO_COLUNA {
         int sk_quadro_coluna PK
+        varchar quadro
         varchar coluna
         int posicao
     }
@@ -369,8 +372,8 @@ erDiagram
 |---|---|---|---:|
 | `dim_grupo.csv` | Dimensão | 1 grupo PBL | 4 (3 + N/A) |
 | `dim_pessoa.csv` | Dimensão | 1 pessoa (inclui `[bot]` e `[externo]`) | 85 (83 + 2 placeholders) |
-| `dim_sprint.csv` | Dimensão | 1 sprint | 16 (15 + N/A) |
-| `dim_quadro_coluna.csv` | Dimensão | 1 coluna do quadro | 13 (12 + N/A) |
+| `dim_sprint.csv` | Dimensão | 1 sprint do ciclo (conformada, sem grupo) | 6 (5 + N/A) |
+| `dim_quadro_coluna.csv` | Dimensão | 1 coluna do quadro (conformada, sem grupo) | 5 (4 + N/A) |
 | `dim_data.csv` | Dimensão | 1 dia do calendário (2022-01-01 a 2026-12-31) | 1.827 (1.826 + N/A) |
 | `fato_commits.csv` | Fato transacional | 1 commit | 2.688 |
 | `fato_merge_requests.csv` | Fato transacional | 1 merge request | 540 |
@@ -380,11 +383,12 @@ erDiagram
 ### 8.2 Convenções
 
 - **Chaves substitutas (`sk_*`)** inteiras, atribuídas em ordem de chave natural; `sk = -1` significa **N/A** (ex.: `sk_sprint = -1` → cartão sem sprint; `sk_data_merged = -1` → MR não mesclado). Cada dimensão tem linha `(N/A)` correspondente.
+- **Dimensões conformadas**: `dim_sprint` e `dim_quadro_coluna` não carregam `grupo` — as linhas repetidas entre grupos foram deduplicadas. Em `dim_sprint`, prevalece a variante com `inicio_em`/`prazo_em` preenchidos (fonte G03, único grupo com datas no extrato): as janelas do ciclo valem para todos os grupos, e o grupo continua identificável nas fatos pelas dimensões degeneradas (`grupo` + `sk_grupo`).
 - **Dimensões degeneradas** preservadas nas fatos (`grupo`, `commit_id`, `mr_numero`, `cartao_numero`) para rastreio direto ao extrato.
-- **Papel das datas**: `sk_data_autorado`, `sk_data_commitado`, `sk_data_criacao`, `sk_data_atualizacao`, `sk_data_merged`, `sk_data_fechamento`, `sk_data_prazo` e `sk_data_evento` apontam para `dim_data` (`sk_data` = `AAAAMMDD`); os timestamps originais permanecem nas fatos.
+- **Papel das datas**: `sk_data_autorado`, `sk_data_commitado`, `sk_data_criacao`, `sk_data_atualizacao`, `sk_data_merged`, `sk_data_fechamento`, `sk_data_inicio`, `sk_data_prazo` e `sk_data_evento` apontam para `dim_data` (`sk_data` = `AAAAMMDD`); os timestamps originais permanecem nas fatos.
 - **Placeholders como membros**: `dim_pessoa` inclui `[bot]` (sk 84) e `[externo]` (sk 85) com `eh_placeholder = 1` — FKs nunca apontam para fora da dimensão.
 - **Multivalorados** (`responsaveis_ids`, `revisores_ids`, `rotulos`) preservados como listas separadas por `;` (decisão do usuário); explodir na consulta quando necessário.
-- **`fato_kanban_eventos`**: dedupe das 24 linhas redundantes (12 eventos `add` com `coluna` vazia triplicados) → 13.170 linhas com `sk_evento` sequencial 1..13.170; `tipo_evento` classifica o evento: `coluna` (9.052, `sk_quadro_coluna` resolvido), `rotulo` (4.106, `sk_quadro_coluna = -1`), `vazio` (12, `coluna` vazia no extrato).
+- **`fato_kanban_eventos`**: dedupe das 24 linhas redundantes (12 eventos `add` com `coluna` vazia triplicados) → 13.170 linhas com `sk_evento` sequencial 1..13.170; `tipo_evento` classifica o evento: `coluna` (9.052, `sk_quadro_coluna` resolvido na dimensão conformada, sk 1–4), `rotulo` (4.106, `sk_quadro_coluna = -1`), `vazio` (12, `coluna` vazia no extrato).
 - **Medidas originais mantidas**: `linhas_*`, `comentarios`, `tempo_*_s` (segundos), `peso`; `e_merge`/`e_rascunho` como 0/1.
 - 3 cartões não têm evento em `fato_kanban_eventos`; 64 cartões abertos têm `sk_fechado_por = -1` e `sk_data_fechamento = -1`.
 - Campos `titulo`/`descricao` preservam quebras de linha dentro de aspas (leia com parser CSV padrão).

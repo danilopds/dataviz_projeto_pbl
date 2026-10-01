@@ -1,236 +1,176 @@
-"""ETL: loads dados/*.csv into a DuckDB lakehouse (lakehouse/pbl.duckdb).
+"""ETL: carrega os CSVs do modelo estrela (dimensional/csv) no DuckDB
+(lakehouse/pbl.duckdb).
 
-Builds the dimensional model from item 8 of modelagem/modelagem_logica.md,
-with one source fix: sprints of G01/G02 inherit the date intervals of G03
-(same sprint number), so commits can be assigned to sprints by commitado_em.
+As dimensões e fatos espelham os CSVs publicados em dimensional/csv,
+gerados por dimensional/build_csv.py a partir dos dados brutos de dados/.
+Colunas analíticas derivadas na carga:
+- fato_commits.sk_sprint_commitado e fato_kanban_eventos.sk_sprint_evento:
+  sprint atribuída pela data (commitado_em / ocorrido_em) dentro da janela
+  inicio_em–prazo_em de dim_sprint (dimensão conformada — as janelas do
+  ciclo valem para todos os grupos);
+- fato_merge_requests.sk_sprint e fato_cartoes.sk_sprint: o -1 dos CSVs
+  (sem sprint) vira NULL no banco, mesma convenção do sk_sprint_commitado;
+- fato_merge_requests.horas_para_merge: horas entre criado_em e merged_em.
+
+O banco é construído em pbl.duckdb.tmp e substitui o anterior só no fim
+(se o dashboard estiver aberto, feche-o e rode novamente).
 """
+import os
 from pathlib import Path
 
 import duckdb
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "dados"
+SRC = ROOT / "dimensional" / "csv"
 OUT = ROOT / "lakehouse" / "pbl.duckdb"
+TMP = ROOT / "lakehouse" / "pbl.duckdb.tmp"
 
 OUT.parent.mkdir(exist_ok=True)
-if OUT.exists():
-    OUT.unlink()
+if TMP.exists():
+    TMP.unlink()
 
-con = duckdb.connect(str(OUT))
+con = duckdb.connect(str(TMP))
 con.execute("SET timezone='UTC'")
 
 
-def load(name: str):
-    con.execute(
-        f"""
-        CREATE TABLE src_{name} AS
-        SELECT * FROM read_csv('{(SRC / f'{name}.csv').as_posix()}',
-            header=true, all_varchar=false, ignore_errors=false)
-        """
-    )
+def read(name: str) -> str:
+    """ FROM clause sobre o CSV publicado, tudo como texto."""
+    return (f"FROM read_csv('{(SRC / f'{name}.csv').as_posix()}', "
+            "header=true, all_varchar=true)")
 
-
-for name in ["grupos", "pessoas", "sprints", "quadro_colunas",
-             "commits", "merge_requests", "cartoes", "kanban_eventos"]:
-    load(name)
 
 # ---------------------------------------------------------------------------
-# Dimensions
+# Dimensões
 # ---------------------------------------------------------------------------
-con.execute("""
+con.execute(f"""
 CREATE TABLE dim_grupo AS
-SELECT row_number() OVER (ORDER BY grupo) AS sk_grupo,
-       grupo, branch_padrao,
+SELECT CAST(sk_grupo AS INTEGER) AS sk_grupo, grupo, branch_padrao,
        CAST(criado_em AS TIMESTAMP) AS criado_em,
        CAST(ultima_atividade_em AS TIMESTAMP) AS ultima_atividade_em
-FROM src_grupos ORDER BY sk_grupo
+{read('dim_grupo')}
 """)
 
-con.execute("""
+con.execute(f"""
 CREATE TABLE dim_pessoa AS
-    SELECT CAST(row_number() OVER (ORDER BY eh_placeholder, pessoa_id) AS INTEGER) AS sk_pessoa,
-           pessoa_id, grupo, papel, situacao, eh_placeholder
-    FROM (
-        SELECT pessoa_id, grupo, papel, situacao, 0 AS eh_placeholder
-        FROM src_pessoas
-        UNION ALL
-        SELECT '[bot]' AS pessoa_id, NULL AS grupo, 'placeholder' AS papel,
-               'active' AS situacao, 1 AS eh_placeholder
-        UNION ALL
-        SELECT '[externo]', NULL, 'placeholder', 'active', 1
-    ) t
-ORDER BY eh_placeholder, pessoa_id
+SELECT CAST(sk_pessoa AS INTEGER) AS sk_pessoa, pessoa_id, grupo,
+       CAST(sk_grupo AS INTEGER) AS sk_grupo, papel, situacao,
+       CAST(eh_placeholder AS INTEGER) AS eh_placeholder
+{read('dim_pessoa')}
 """)
 
-# dim_sprint: G01/G02 sprints inherit G03 dates by sprint number
-con.execute("""
+con.execute(f"""
 CREATE TABLE dim_sprint AS
-WITH base AS (
-    SELECT s.grupo, s.sprint, s.situacao, s.inicio_em, s.prazo_em
-    FROM src_sprints s
-),
-g03 AS (
-    SELECT sprint, inicio_em, prazo_em FROM src_sprints WHERE grupo = 'G03'
-),
-fixed AS (
-    SELECT b.grupo, b.sprint, b.situacao,
-           CASE WHEN b.inicio_em IS NULL AND b.grupo <> 'G03'
-                THEN g.inicio_em ELSE b.inicio_em END AS inicio_em,
-           CASE WHEN b.prazo_em IS NULL AND b.grupo <> 'G03'
-                THEN g.prazo_em ELSE b.prazo_em END AS prazo_em
-    FROM base b LEFT JOIN g03 g USING (sprint)
-)
-SELECT CAST(row_number() OVER (ORDER BY grupo, sprint) AS INTEGER) AS sk_sprint,
-       grupo, sprint, situacao,
+SELECT CAST(sk_sprint AS INTEGER) AS sk_sprint, sprint, situacao,
        CAST(inicio_em AS DATE) AS inicio_em,
-       CAST(prazo_em AS DATE) AS prazo_em
-FROM fixed
-UNION ALL
-SELECT -1, '(N/A)', '(sem sprint)', '', NULL, NULL
+       CAST(sk_data_inicio AS INTEGER) AS sk_data_inicio,
+       CAST(prazo_em AS DATE) AS prazo_em,
+       CAST(sk_data_prazo AS INTEGER) AS sk_data_prazo
+{read('dim_sprint')}
 """)
 
-# dim_data: calendar covering all timestamps
-con.execute("""
-CREATE TABLE dim_data AS
-WITH bounds AS (
-    SELECT min(ts) AS min_date, max(ts) AS max_date FROM (
-        SELECT min(CAST(commitado_em AS TIMESTAMP)) AS ts FROM src_commits
-        UNION ALL
-        SELECT max(CAST(commitado_em AS TIMESTAMP)) FROM src_commits
-        UNION ALL
-        SELECT min(CAST(criado_em AS TIMESTAMP)) FROM src_merge_requests
-        UNION ALL
-        SELECT max(CAST(criado_em AS TIMESTAMP)) FROM src_merge_requests
-        UNION ALL
-        SELECT min(CAST(criado_em AS TIMESTAMP)) FROM src_cartoes
-        UNION ALL
-        SELECT max(CAST(fechado_em AS TIMESTAMP)) FROM src_cartoes
-        UNION ALL
-        SELECT min(CAST(ocorrido_em AS TIMESTAMP)) FROM src_kanban_eventos
-        UNION ALL
-        SELECT max(CAST(ocorrido_em AS TIMESTAMP)) FROM src_kanban_eventos
-    )
-),
-days AS (
-    SELECT unnest(generate_series(min_date, max_date, INTERVAL 1 DAY)) AS d
-    FROM bounds
-)
-SELECT CAST(strftime(d, '%Y%m%d') AS INTEGER) AS sk_data,
-       CAST(d AS DATE) AS data,
-       year(d) AS ano, quarter(d) AS trimestre, month(d) AS mes,
-       strftime(d, '%A') AS nome_dia_semana,
-       CASE WHEN dayofweek(d) IN (0, 6) THEN 1 ELSE 0 END AS eh_fim_de_semana
-FROM days
-""")
-
-# ---------------------------------------------------------------------------
-# Facts
-# ---------------------------------------------------------------------------
-con.execute("""
-CREATE TABLE fato_commits AS
-SELECT c.grupo, c.commit_id, p.sk_pessoa AS sk_autor,
-       CAST(strftime(CAST(c.autorado_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_autorado,
-       CAST(strftime(CAST(c.commitado_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_commitado,
-       CAST(c.autorado_em AS TIMESTAMP) AS autorado_em,
-       CAST(c.commitado_em AS TIMESTAMP) AS commitado_em,
-       CAST(c.e_merge AS INTEGER) AS e_merge,
-       CAST(c.linhas_adicionadas AS INTEGER) AS linhas_adicionadas,
-       CAST(c.linhas_removidas AS INTEGER) AS linhas_removidas,
-       CAST(c.linhas_total AS INTEGER) AS linhas_total,
-       c.titulo, c.mensagem,
-       s.sk_sprint AS sk_sprint_commitado
-FROM src_commits c
-LEFT JOIN dim_pessoa p ON p.pessoa_id = c.autor_id
-LEFT JOIN dim_sprint s
-  ON s.grupo = c.grupo
- AND CAST(c.commitado_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
-""")
-
-con.execute("""
-CREATE TABLE fato_merge_requests AS
-SELECT m.grupo, CAST(m.mr_numero AS INTEGER) AS mr_numero,
-       pa.sk_pessoa AS sk_autor, pm.sk_pessoa AS sk_merged_por,
-       s.sk_sprint,
-       CAST(strftime(CAST(m.criado_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_criacao,
-       CAST(strftime(CAST(m.merged_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_merged,
-       CAST(m.criado_em AS TIMESTAMP) AS criado_em,
-       CAST(m.merged_em AS TIMESTAMP) AS merged_em,
-       m.situacao, m.titulo, m.descricao,
-       CAST(m.e_rascunho AS INTEGER) AS e_rascunho,
-       CAST(m.comentarios AS INTEGER) AS comentarios,
-       m.branch_origem, m.branch_destino,
-       m.revisores_ids, m.responsaveis_ids, m.rotulos,
-       date_diff('hour', CAST(m.criado_em AS TIMESTAMP),
-                 CAST(m.merged_em AS TIMESTAMP)) AS horas_para_merge
-FROM src_merge_requests m
-LEFT JOIN dim_pessoa pa ON pa.pessoa_id = m.autor_id
-LEFT JOIN dim_pessoa pm ON pm.pessoa_id = m.merged_por_id
-LEFT JOIN dim_sprint s
-  ON s.grupo = m.grupo AND s.sprint = m.sprint
-""")
-
-con.execute("""
-CREATE TABLE fato_cartoes AS
-SELECT ct.grupo, CAST(ct.cartao_numero AS INTEGER) AS cartao_numero,
-       pa.sk_pessoa AS sk_autor, pf.sk_pessoa AS sk_fechado_por,
-       s.sk_sprint,
-       CAST(strftime(CAST(ct.criado_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_criacao,
-       CAST(strftime(CAST(ct.fechado_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_fechamento,
-       CAST(ct.criado_em AS TIMESTAMP) AS criado_em,
-       CAST(ct.fechado_em AS TIMESTAMP) AS fechado_em,
-       ct.situacao, ct.titulo, ct.descricao,
-       CAST(ct.peso AS INTEGER) AS peso,
-       CAST(ct.tempo_estimado_s AS BIGINT) AS tempo_estimado_s,
-       CAST(ct.tempo_gasto_s AS BIGINT) AS tempo_gasto_s,
-       CAST(ct.comentarios AS INTEGER) AS comentarios,
-       ct.responsaveis_ids, ct.rotulos
-FROM src_cartoes ct
-LEFT JOIN dim_pessoa pa ON pa.pessoa_id = ct.autor_id
-LEFT JOIN dim_pessoa pf ON pf.pessoa_id = ct.fechado_por_id
-LEFT JOIN dim_sprint s
-  ON s.grupo = ct.grupo AND s.sprint = ct.sprint
-""")
-
-# dim_quadro_coluna: same sk numbering as relacional/csv/dim_quadro_coluna.csv
-con.execute("""
+con.execute(f"""
 CREATE TABLE dim_quadro_coluna AS
-SELECT CAST(row_number() OVER (ORDER BY grupo, quadro, posicao) AS INTEGER) AS sk_quadro_coluna,
-       grupo, quadro, posicao, coluna
-FROM src_quadro_colunas
-UNION ALL
-SELECT -1, '(N/A)', '(n/a)', -1, '(n/a)'
+SELECT CAST(sk_quadro_coluna AS INTEGER) AS sk_quadro_coluna, quadro,
+       CAST(posicao AS INTEGER) AS posicao, coluna
+{read('dim_quadro_coluna')}
 """)
 
-con.execute("""
+con.execute(f"""
+CREATE TABLE dim_data AS
+SELECT CAST(sk_data AS INTEGER) AS sk_data, TRY_CAST(data AS DATE) AS data,
+       CAST(ano AS INTEGER) AS ano, CAST(trimestre AS INTEGER) AS trimestre,
+       CAST(mes AS INTEGER) AS mes, nome_mes, CAST(dia AS INTEGER) AS dia,
+       CAST(dia_semana_num AS INTEGER) AS dia_semana_num,
+       nome_dia_semana, CAST(eh_fim_de_semana AS INTEGER) AS eh_fim_de_semana
+{read('dim_data')}
+""")
+
+# ---------------------------------------------------------------------------
+# Fatos
+# ---------------------------------------------------------------------------
+con.execute(f"""
+CREATE TABLE fato_commits AS
+SELECT CAST(f.sk_grupo AS INTEGER) AS sk_grupo,
+       CAST(f.sk_autor AS INTEGER) AS sk_autor,
+       CAST(f.sk_data_autorado AS INTEGER) AS sk_data_autorado,
+       CAST(f.autorado_em AS TIMESTAMP) AS autorado_em,
+       CAST(f.sk_data_commitado AS INTEGER) AS sk_data_commitado,
+       CAST(f.commitado_em AS TIMESTAMP) AS commitado_em,
+       CAST(f.e_merge AS INTEGER) AS e_merge,
+       CAST(f.linhas_adicionadas AS INTEGER) AS linhas_adicionadas,
+       CAST(f.linhas_removidas AS INTEGER) AS linhas_removidas,
+       CAST(f.linhas_total AS INTEGER) AS linhas_total,
+       f.grupo, f.commit_id, f.titulo, f.mensagem,
+       s.sk_sprint AS sk_sprint_commitado
+{read('fato_commits')} f
+LEFT JOIN dim_sprint s
+  ON CAST(f.commitado_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
+""")
+
+con.execute(f"""
+CREATE TABLE fato_merge_requests AS
+SELECT CAST(f.sk_grupo AS INTEGER) AS sk_grupo,
+       CAST(f.sk_autor AS INTEGER) AS sk_autor,
+       CAST(f.sk_merged_por AS INTEGER) AS sk_merged_por,
+       NULLIF(CAST(f.sk_sprint AS INTEGER), -1) AS sk_sprint,
+       CAST(f.sk_data_criacao AS INTEGER) AS sk_data_criacao,
+       CAST(f.criado_em AS TIMESTAMP) AS criado_em,
+       CAST(f.sk_data_atualizacao AS INTEGER) AS sk_data_atualizacao,
+       CAST(f.atualizado_em AS TIMESTAMP) AS atualizado_em,
+       CAST(f.sk_data_merged AS INTEGER) AS sk_data_merged,
+       CAST(f.merged_em AS TIMESTAMP) AS merged_em,
+       CAST(f.sk_data_fechamento AS INTEGER) AS sk_data_fechamento,
+       CAST(f.fechado_em AS TIMESTAMP) AS fechado_em,
+       CAST(f.mr_numero AS INTEGER) AS mr_numero,
+       f.titulo, f.descricao, f.situacao,
+       CAST(f.e_rascunho AS INTEGER) AS e_rascunho,
+       CAST(f.comentarios AS INTEGER) AS comentarios,
+       f.branch_origem, f.branch_destino,
+       f.revisores_ids, f.responsaveis_ids, f.rotulos, f.grupo,
+       date_diff('hour', CAST(f.criado_em AS TIMESTAMP),
+                 CAST(f.merged_em AS TIMESTAMP)) AS horas_para_merge
+{read('fato_merge_requests')} f
+""")
+
+con.execute(f"""
+CREATE TABLE fato_cartoes AS
+SELECT CAST(f.sk_grupo AS INTEGER) AS sk_grupo,
+       CAST(f.sk_autor AS INTEGER) AS sk_autor,
+       CAST(f.sk_fechado_por AS INTEGER) AS sk_fechado_por,
+       NULLIF(CAST(f.sk_sprint AS INTEGER), -1) AS sk_sprint,
+       CAST(f.sk_data_criacao AS INTEGER) AS sk_data_criacao,
+       CAST(f.criado_em AS TIMESTAMP) AS criado_em,
+       CAST(f.sk_data_atualizacao AS INTEGER) AS sk_data_atualizacao,
+       CAST(f.atualizado_em AS TIMESTAMP) AS atualizado_em,
+       CAST(f.sk_data_fechamento AS INTEGER) AS sk_data_fechamento,
+       CAST(f.fechado_em AS TIMESTAMP) AS fechado_em,
+       CAST(f.sk_data_prazo AS INTEGER) AS sk_data_prazo,
+       CAST(f.prazo_em AS DATE) AS prazo_em,
+       CAST(f.cartao_numero AS INTEGER) AS cartao_numero,
+       f.titulo, f.descricao, f.situacao,
+       CAST(f.peso AS INTEGER) AS peso,
+       CAST(f.comentarios AS INTEGER) AS comentarios,
+       CAST(f.tempo_estimado_s AS BIGINT) AS tempo_estimado_s,
+       CAST(f.tempo_gasto_s AS BIGINT) AS tempo_gasto_s,
+       f.responsaveis_ids, f.rotulos, f.grupo
+{read('fato_cartoes')} f
+""")
+
+con.execute(f"""
 CREATE TABLE fato_kanban_eventos AS
-WITH dedup AS (
-    SELECT grupo, cartao_numero, ocorrido_em, acao, coluna, pessoa_id,
-           row_number() OVER (
-               PARTITION BY grupo, cartao_numero, ocorrido_em, acao, coluna
-               ORDER BY pessoa_id) AS rn
-    FROM src_kanban_eventos
-)
-SELECT CAST(row_number() OVER (ORDER BY d.grupo, d.cartao_numero, d.ocorrido_em, d.acao, d.coluna) AS INTEGER) AS sk_evento,
-       d.grupo, CAST(d.cartao_numero AS INTEGER) AS cartao_numero,
-       p.sk_pessoa AS sk_pessoa,
-       coalesce(q.sk_quadro_coluna, -1) AS sk_quadro_coluna,
-       CAST(strftime(CAST(d.ocorrido_em AS TIMESTAMP), '%Y%m%d') AS INTEGER) AS sk_data_evento,
-       CAST(d.ocorrido_em AS TIMESTAMP) AS ocorrido_em,
-       d.acao,
-       CASE WHEN d.coluna IS NULL OR trim(d.coluna) = '' THEN 'vazio'
-            WHEN q.sk_quadro_coluna IS NOT NULL THEN 'coluna'
-            ELSE 'rotulo' END AS tipo_evento,
-       d.coluna
-FROM dedup d
-LEFT JOIN dim_pessoa p ON p.pessoa_id = d.pessoa_id
-LEFT JOIN dim_quadro_coluna q
-  ON q.grupo = d.grupo AND q.coluna = d.coluna AND q.sk_quadro_coluna <> -1
-WHERE d.rn = 1
+SELECT CAST(f.sk_evento AS INTEGER) AS sk_evento,
+       CAST(f.sk_grupo AS INTEGER) AS sk_grupo,
+       CAST(f.sk_pessoa AS INTEGER) AS sk_pessoa,
+       CAST(f.sk_quadro_coluna AS INTEGER) AS sk_quadro_coluna,
+       CAST(f.sk_data_evento AS INTEGER) AS sk_data_evento,
+       CAST(f.ocorrido_em AS TIMESTAMP) AS ocorrido_em,
+       f.grupo, CAST(f.cartao_numero AS INTEGER) AS cartao_numero,
+       f.acao, f.tipo_evento, f.coluna,
+       s.sk_sprint AS sk_sprint_evento
+{read('fato_kanban_eventos')} f
+LEFT JOIN dim_sprint s
+  ON CAST(f.ocorrido_em AS DATE) BETWEEN s.inicio_em AND s.prazo_em
 """)
-
-for t in ["grupos", "pessoas", "sprints", "quadro_colunas",
-          "commits", "merge_requests", "cartoes", "kanban_eventos"]:
-    con.execute(f"DROP TABLE src_{t}")
 
 con.execute("CHECKPOINT")
 print(con.execute(
@@ -242,3 +182,12 @@ counts = {
               "fato_cartoes", "fato_kanban_eventos"]
 }
 print(counts)
+con.close()
+
+try:
+    os.replace(TMP, OUT)
+except PermissionError:
+    raise SystemExit(
+        "não foi possível substituir lakehouse/pbl.duckdb — feche o dashboard "
+        "(streamlit) e rode novamente; o banco novo ficou em "
+        "lakehouse/pbl.duckdb.tmp")
