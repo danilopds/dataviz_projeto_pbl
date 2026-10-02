@@ -83,7 +83,7 @@ sk_sel = sprints_df.loc[
     sprints_df["label"].isin(sprints_sel), "sk_sprint"].tolist()
 sk_in = ",".join(str(int(s)) for s in sk_sel) or "-999"
 sem_sprint = st.sidebar.checkbox(
-    "Incluir atividade fora de sprint", value=True)
+    "Incluir atividade fora de sprint", value=False)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Limiares de alerta")
@@ -175,6 +175,7 @@ c1.metric(
     f"de {int(kpi_commits['total'][0]):,} no filtro (inclui bots/externos)".replace(
         ",", "."),
     delta_color="off",
+    delta_arrow="off",
     help="Commits de membros cadastrados nos grupos selecionados. "
          "O total inclui commits de atores não cadastrados "
          "([bot]/[externo]).")
@@ -183,18 +184,21 @@ c2.metric(
     f"{int(kpi_mrs['n_merged'][0]):,}".replace(",", "."),
     f"de {int(kpi_mrs['n_total'][0]):,} MRs no filtro".replace(",", "."),
     delta_color="off",
+    delta_arrow="off",
     help="Merge Requests com situação 'merged' dentro dos filtros atuais.")
 c3.metric(
     "Cartões fechados",
     f"{int(kpi_cartoes['n_closed'][0]):,}".replace(",", "."),
     f"de {int(kpi_cartoes['n_total'][0]):,} cartões no filtro".replace(",", "."),
     delta_color="off",
+    delta_arrow="off",
     help="Cartões Kanban com situação 'closed' dentro dos filtros atuais.")
 c4.metric(
     "Membros ativos",
     str(int(kpi_membros['n'][0])),
     f"de {int(kpi_membros_total['n'][0])} membros cadastrados",
     delta_color="off",
+    delta_arrow="off",
     help="Membros (exceto placeholders) com pelo menos um commit ou MR "
          "nos filtros atuais.")
 
@@ -485,10 +489,27 @@ with tab_ritmo:
         WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint_commitado')}
         GROUP BY 1, 2 ORDER BY 1
     """)
-    fig = px.area(serie, x="dia", y="commits", color="grupo",
-                  title="Commits por dia (data de commitado_em)",
-                  labels={"dia": "Data", "commits": "Commits",
+    serie["pct"] = (100 * serie["commits"]
+                    / serie.groupby("grupo")["commits"].transform("sum"))
+    fig = px.line(serie, x="dia", y="pct", color="grupo",
+                  custom_data=["commits"],
+                  color_discrete_map={"G01": "#0072B2", "G02": "#E69F00",
+                                      "G03": "#CC79A7"},
+                  title="Commits por dia (% do total de commits do grupo)",
+                  labels={"dia": "Data", "pct": "% dos commits do grupo",
                           "grupo": "Grupo"})
+    fig.update_traces(hovertemplate=(
+        "%{x|%Y-%m-%d}<br>%{y:.1f}% (%{customdata[0]} commits)"
+        "<extra>%{fullData.name}</extra>"))
+    fig.update_yaxes(ticksuffix="%", rangemode="tozero")
+    # add_shape/add_annotation evitam o bug de add_vline com eixo de datas
+    for _, s in sprints_df[sprints_df["label"].isin(sprints_sel)].iterrows():
+        x = s["prazo_em"].strftime("%Y-%m-%d")
+        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
+                      line=dict(color="gray", dash="dash", width=1))
+        fig.add_annotation(x=x, y=1, yref="paper", text=s["sprint"],
+                           showarrow=False, yanchor="bottom",
+                           font=dict(color="gray", size=10))
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("**Distribuição dentro de cada sprint** "
