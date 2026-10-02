@@ -785,20 +785,42 @@ with tab_review:
         with c4:
             tamanho = query(f"""
                 SELECT f.grupo,
-                       count(*) FILTER (WHERE f.e_merge = 1) AS merge_commits,
-                       coalesce(sum(f.linhas_total)
-                                FILTER (WHERE f.e_merge = 1), 0) AS linhas_merge
+                       coalesce(s.sprint, '(sem sprint)') AS sprint,
+                       sum(f.linhas_total) AS linhas_merge,
+                       count(*) AS merge_commits
                 FROM fato_commits f
-                WHERE {grupos_cond}
+                LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_commitado
+                WHERE {grupos_cond} AND f.e_merge = 1
                   AND {sprint_cond('f.sk_sprint_commitado')}
-                GROUP BY 1
+                GROUP BY 1, 2
             """)
+            ordem_sprints = sprints_df["sprint"].drop_duplicates().tolist()
+            cores_sprint = dict(zip(
+                ordem_sprints, px.colors.qualitative.Set2))
+            cores_sprint["(sem sprint)"] = "#bdbdbd"
             fig = px.bar(
-                tamanho, x="grupo", y="linhas_merge",
-                color="grupo",
-                title="Tamanho das integrações (linhas em commits de merge)",
+                tamanho, x="grupo", y="linhas_merge", color="sprint",
+                custom_data=["merge_commits"], text="linhas_merge",
+                title="Tamanho das integrações por sprint "
+                      "(linhas em commits de merge)",
                 labels={"linhas_merge": "Linhas em commits de merge",
-                        "grupo": "Grupo"})
+                        "grupo": "Grupo", "sprint": "Sprint"},
+                color_discrete_map=cores_sprint,
+                category_orders={"sprint": ordem_sprints + ["(sem sprint)"],
+                                 "grupo": sorted(grupos_sel)})
+            fig.update_traces(
+                texttemplate="%{text:,.0f}", textposition="inside",
+                hovertemplate="%{y:,.0f} linhas (%{customdata[0]} merges)")
+            fig.update_layout(barmode="stack",
+                              uniformtext=dict(minsize=9, mode="hide"))
+            totais = tamanho.groupby("grupo", as_index=False)[
+                "linhas_merge"].sum()
+            fig.add_scatter(
+                x=totais["grupo"], y=totais["linhas_merge"], mode="text",
+                text=totais["linhas_merge"].map("{:,.0f}".format),
+                textposition="top center", showlegend=False,
+                hoverinfo="skip", cliponaxis=False)
+            fig.update_yaxes(range=[0, totais["linhas_merge"].max() * 1.1])
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("**Alertas de review**")
