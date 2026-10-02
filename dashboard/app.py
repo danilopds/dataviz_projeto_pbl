@@ -140,18 +140,26 @@ kpi_cartoes = query(f"""
     WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint')}
 """)
 
+# Atividade por repositório (f.grupo), mesma base do gráfico de carga.
 kpi_membros = query(f"""
-    SELECT count(DISTINCT p.pessoa_id) AS n
-    FROM dim_pessoa p
+    WITH ativ AS (
+        SELECT grupo, sk_autor FROM fato_commits
+        WHERE grupo IN ({grupos_in}) AND {sprint_cond('sk_sprint_commitado')}
+        UNION
+        SELECT grupo, sk_autor FROM fato_merge_requests
+        WHERE grupo IN ({grupos_in}) AND {sprint_cond('sk_sprint')}
+        UNION
+        SELECT grupo, sk_autor FROM fato_cartoes
+        WHERE grupo IN ({grupos_in}) AND situacao = 'closed'
+          AND {sprint_cond('sk_sprint')}
+    )
+    SELECT DISTINCT a.grupo, p.pessoa_id
+    FROM ativ a JOIN dim_pessoa p ON p.sk_pessoa = a.sk_autor
     WHERE p.eh_placeholder = 0
-      AND p.grupo IN ({grupos_in})
-      AND (p.sk_pessoa IN (SELECT DISTINCT sk_autor FROM fato_commits
-                           WHERE grupo IN ({grupos_in})
-                             AND {sprint_cond('sk_sprint_commitado')})
-        OR p.sk_pessoa IN (SELECT DISTINCT sk_autor FROM fato_merge_requests
-                           WHERE grupo IN ({grupos_in})
-                             AND {sprint_cond('sk_sprint')}))
 """)
+n_membros_ativos = kpi_membros["pessoa_id"].nunique()
+membros_por_grupo = " · ".join(
+    f"{g} {n}" for g, n in kpi_membros.groupby("grupo").size().items())
 
 kpi_membros_total = query(f"""
     SELECT count(*) AS n
@@ -195,12 +203,14 @@ c3.metric(
     help="Cartões Kanban com situação 'closed' dentro dos filtros atuais.")
 c4.metric(
     "Membros ativos",
-    str(int(kpi_membros['n'][0])),
-    f"de {int(kpi_membros_total['n'][0])} membros cadastrados",
+    str(n_membros_ativos),
+    f"{membros_por_grupo}",
     delta_color="off",
     delta_arrow="off",
-    help="Membros (exceto placeholders) com pelo menos um commit ou MR "
-         "nos filtros atuais.")
+    help="Membros (exceto placeholders) com pelo menos um commit, MR ou "
+         "cartão fechado nos filtros atuais. A quebra por grupo é por "
+         "repositório, igual ao gráfico de carga de trabalho; quem atua no "
+         "repositório de outro grupo conta no repositório onde atuou.")
 
 tab_over, tab_ritmo, tab_carga, tab_review, tab_quadro = st.tabs(
     ["🏠 Visão geral", "⏱️ Ritmo & Prazos", "👥 Carga de Trabalho",
@@ -619,13 +629,19 @@ with tab_carga:
         ["grupo", "total"], ascending=[True, False])
 
     grupo_foco = st.selectbox("Grupo para destaque", grupos_sel)
-    foco = carga_total[carga_total["grupo"] == grupo_foco].head(15)
+    foco = carga_total[carga_total["grupo"] == grupo_foco].head(15).copy()
+    grupo_de = query("SELECT pessoa_id, grupo FROM dim_pessoa").set_index(
+        "pessoa_id")["grupo"]
+    foco["origem"] = foco["pessoa"].map(grupo_de)
+    visitante = foco["origem"].notna() & (foco["origem"] != grupo_foco)
+    foco["rotulo"] = foco["pessoa"].where(
+        ~visitante, foco["pessoa"] + " (de " + foco["origem"].fillna("") + ")")
     fig = go.Figure()
-    fig.add_bar(name="Commits", x=foco["pessoa"], y=foco["commits"],
+    fig.add_bar(name="Commits", x=foco["rotulo"], y=foco["commits"],
                 marker_color="#4c78a8")
-    fig.add_bar(name="MRs", x=foco["pessoa"], y=foco["mrs"],
+    fig.add_bar(name="MRs", x=foco["rotulo"], y=foco["mrs"],
                 marker_color="#f58518")
-    fig.add_bar(name="Cartões fechados", x=foco["pessoa"],
+    fig.add_bar(name="Cartões fechados", x=foco["rotulo"],
                 y=foco["cartoes_fechados"], marker_color="#54a24b")
     fig.update_layout(
         barmode="stack",
