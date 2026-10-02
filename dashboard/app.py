@@ -107,6 +107,10 @@ PERC_EIXO = st.sidebar.slider(
 st.sidebar.caption("🧩 Quadro × Repo")
 LIM_CORR = st.sidebar.slider(
     "Correlação quadro × repositório mínima", 0.0, 1.0, 0.5)
+LIM_CONC = st.sidebar.slider(
+    "% dos cartões da pessoa em um único tipo de trabalho", 40, 100, 70)
+MIN_CART_CONC = st.sidebar.slider(
+    "Mínimo de cartões por pessoa para avaliar concentração", 3, 30, 8)
 
 grupos_cond = f"f.grupo IN ({grupos_in})"
 
@@ -218,7 +222,7 @@ c4.metric(
 
 tab_over, tab_ritmo, tab_carga, tab_review, tab_quadro = st.tabs(
     ["🏠 Visão geral", "⏱️ Ritmo & Prazos", "👥 Carga de Trabalho",
-     "🔍 Code Review", "🧩 Quadro × Repositório"])
+     "🔍 Code Review", "🧩 Quadro & Repositório"])
 
 # =========================================================================
 # TAB 0 — VISÃO GERAL
@@ -922,6 +926,9 @@ with tab_quadro:
             title="Cartões fechados × commits por sprint",
             yaxis_title="Quantidade")
         fig.update_xaxes(tickangle=-45)
+        grupos_ord = qxr["grupo"].reset_index(drop=True)
+        for i in grupos_ord.index[grupos_ord != grupos_ord.shift()][1:]:
+            fig.add_vline(x=i - 0.5, line_dash="dash", line_color="#9e9e9e")
         st.plotly_chart(fig, use_container_width=True)
 
         if len(qxr) >= 3:
@@ -939,59 +946,167 @@ with tab_quadro:
         else:
             st.info("Menos de 3 sprints no recorte — correlação não calculada.")
 
-        vinculo = query(f"""
-            WITH refs AS (
-                SELECT f.grupo,
-                       regexp_extract(f.titulo, '#([0-9]+)', 1) AS ref
-                FROM fato_commits f
-                WHERE {grupos_cond}
-                  AND {sprint_cond('f.sk_sprint_commitado')}
-            )
-            SELECT r.grupo,
-                   count(*) AS commits_total,
-                   count(*) FILTER (WHERE r.ref <> '') AS commits_com_ref,
-                   count(DISTINCT TRY_CAST(r.ref AS INTEGER))
-                       FILTER (WHERE r.ref <> '') AS cartoes_distintos
-            FROM refs r
-            GROUP BY 1
-        """)
-        cartoes_tot = query(f"""
-            SELECT f.grupo, count(*) AS cartoes_total
-            FROM fato_cartoes f WHERE {grupos_cond} GROUP BY 1
-        """)
-        vinculo = vinculo.merge(cartoes_tot, on="grupo")
-        vinculo["% commits com #"] = (
-            100 * vinculo["commits_com_ref"] / vinculo["commits_total"]).round(1)
-        vinculo["% cartões citados"] = (
-            100 * vinculo["cartoes_distintos"] / vinculo["cartoes_total"]).round(1)
-        st.markdown(
-            "**Rastreio heurístico via `#N`** (número do cartão citado em "
-            "títulos/branches de commits — aproximação do extrator)")
-        st.dataframe(
-            vinculo.rename(columns={
-                "grupo": "Grupo", "commits_total": "Commits",
-                "commits_com_ref": "Com #N",
-                "cartoes_distintos": "Cartões distintos citados",
-                "cartoes_total": "Cartões no quadro"}),
-            use_container_width=True, hide_index=True)
-
-        st.markdown("**Ritmo do quadro: eventos por tipo**")
-        eventos = query(f"""
-            SELECT f.grupo, s.sprint, f.tipo_evento, count(*) AS n
-            FROM fato_kanban_eventos f
-            LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_evento
-            WHERE {grupos_cond}
-              AND {sprint_cond('f.sk_sprint_evento')}
-            GROUP BY 1, 2, 3
-        """)
-        eventos["grupo_sprint"] = eventos["grupo"] + " · " + eventos["sprint"].fillna("(fora)")
-        fig = px.bar(eventos, x="grupo_sprint", y="n", color="tipo_evento",
-                     title="Eventos do Kanban por sprint (coluna / rótulo)",
-                     labels={"n": "Eventos", "tipo_evento": "Tipo"})
-        fig.update_xaxes(tickangle=-45)
-        st.plotly_chart(fig, use_container_width=True)
-
         st.caption(
             "Como ler: sprints com muitos commits e poucos cartões fechados "
             "indicam trabalho técnico fora do quadro; o contrário indica "
             "plano sem execução versionada.")
+
+    # ---------------------------------------------------------------------
+    # Concentração por tipo de trabalho
+    # ---------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Alguém está concentrado em um tipo de tarefa?")
+
+    tipo_por_rotulo = {
+        "DOCUMENTATION": "Documentação", "CODE": "Código",
+        "DESIGN": "Design", "BUG": "Bug/Fix", "FIX": "Bug/Fix",
+        "NEGÓCIOS": "Negócios", "USER-STORY": "User story",
+        "PRESENTATION": "Apresentação", "CODE_REVIEW": "Code review",
+        "REQUIREMENTS": "Requisitos", "TEST": "Teste", "DEPLOY": "Deploy"}
+
+    cart = query(f"""
+        SELECT f.grupo, f.cartao_numero, f.responsaveis_ids, f.rotulos
+        FROM fato_cartoes f
+        WHERE {grupos_cond} AND {sprint_cond('f.sk_sprint')}
+          AND f.responsaveis_ids <> '' AND f.rotulos <> ''
+    """)
+    cart["pessoa"] = cart["responsaveis_ids"].str.split(";")
+    cart["tipo"] = cart["rotulos"].str.split(";").map(
+        lambda rs: sorted({tipo_por_rotulo[r.strip().upper()] for r in rs
+                           if r.strip().upper() in tipo_por_rotulo}))
+    conc = (cart.explode("pessoa").explode("tipo")
+            .dropna(subset=["pessoa", "tipo"]))
+    conc = conc[~conc["pessoa"].str.startswith("[")]
+
+    base = (conc.groupby(["grupo", "pessoa"])["cartao_numero"].nunique()
+            .rename("n_cartoes"))
+    base = base[base >= MIN_CART_CONC]
+    pct = (conc.groupby(["grupo", "pessoa", "tipo"])["cartao_numero"].nunique()
+           .unstack("tipo", fill_value=0))
+    pct = pct.loc[pct.index.isin(base.index)]
+
+    if pct.empty:
+        st.info(
+            f"Nenhuma pessoa com pelo menos {MIN_CART_CONC} cartões "
+            "com responsável e tipo de trabalho no filtro atual.")
+    else:
+        pct = pct.div(base.loc[pct.index], axis=0) * 100
+        pct["top_pct"] = pct.max(axis=1)
+        pct["top_tipo"] = pct.drop(columns="top_pct").idxmax(axis=1)
+        pct = pct.join(base).reset_index()
+        pct["concentrado"] = pct["top_pct"] > LIM_CONC
+        pct = pct.sort_values(
+            ["grupo", "top_pct"], ascending=[True, False])
+        tipos_cols = [t for t in sorted(set(tipo_por_rotulo.values()))
+                      if t in pct.columns]
+        pct["linha"] = (
+            pct["grupo"] + " · " + pct["pessoa"]
+            + " (" + pct["n_cartoes"].astype(str) + ")"
+            + pct["concentrado"].map({True: " ⚠", False: ""}))
+
+        z = pct[tipos_cols].round(0)
+        fig = go.Figure(go.Heatmap(
+            z=z.to_numpy(), x=tipos_cols, y=pct["linha"],
+            zmin=0, zmax=100, colorscale="Blues",
+            text=z.astype(int).astype(str).to_numpy() + "%",
+            texttemplate="%{text}",
+            hovertemplate="%{y}<br>%{x}: %{z:.0f}% dos cartões<extra></extra>",
+            colorbar=dict(title="% dos cartões")))
+        fig.update_layout(
+            title="% dos cartões de cada pessoa por tipo de trabalho "
+                  "(entre parênteses: nº de cartões · ⚠ = acima do limiar)",
+            height=max(320, 26 * len(pct) + 160))
+        fig.update_yaxes(autorange="reversed")
+        fig.update_xaxes(side="top")
+        fig.update_layout(margin=dict(t=150), title_y=0.98)
+        st.plotly_chart(fig, use_container_width=True)
+
+        for grupo_nome, sub in pct.groupby("grupo"):
+            acima = sub[sub["concentrado"]]
+            if acima.empty:
+                st.success(
+                    f"**{grupo_nome}** — ninguém acima de {LIM_CONC}% em um "
+                    f"único tipo ({len(sub)} pessoas avaliadas).")
+            else:
+                lista = "; ".join(
+                    f"{r.pessoa} ({r.top_pct:.0f}% {r.top_tipo}, "
+                    f"{r.n_cartoes} cartões)" for r in acima.itertuples())
+                st.warning(
+                    f"**{grupo_nome}** — {len(acima)} de {len(sub)} pessoas "
+                    f"concentradas em um tipo: {lista}.")
+        st.caption(
+            "Considera todos os cartões atribuídos à pessoa (responsável "
+            "atual) que têm rótulo de tipo; rótulos de artefato (ART.*), "
+            "tamanho e coluna ficam de fora. Cartão com mais de um tipo conta "
+            "em cada um, então a linha pode somar mais de 100%.")
+
+    # ---------------------------------------------------------------------
+    # Arrasto em lote no quadro
+    # ---------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Os cartões são arrastados em lote?")
+    lote_gap_min, lote_min_cartoes = 10, 3
+
+    mov = query(f"""
+        SELECT f.grupo, p.pessoa_id AS pessoa, f.cartao_numero,
+               f.ocorrido_em, f.sk_sprint_evento, s.sprint
+        FROM fato_kanban_eventos f
+        JOIN dim_pessoa p ON p.sk_pessoa = f.sk_pessoa
+        LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_evento
+        WHERE {grupos_cond} AND f.tipo_evento = 'coluna' AND f.acao = 'add'
+          AND p.eh_placeholder = 0
+        ORDER BY f.grupo, p.pessoa_id, f.ocorrido_em
+    """)
+    chave = [mov["grupo"], mov["pessoa"]]
+    gap = mov.groupby(["grupo", "pessoa"])["ocorrido_em"].diff()
+    novo_lote = gap.isna() | (gap > pd.Timedelta(minutes=lote_gap_min))
+    mov["lote"] = novo_lote.groupby(chave).cumsum()
+    mov["cartoes_no_lote"] = mov.groupby(["grupo", "pessoa", "lote"])[
+        "cartao_numero"].transform("nunique")
+    mov["em_lote"] = mov["cartoes_no_lote"] >= lote_min_cartoes
+
+    no_filtro = mov["sk_sprint_evento"].isin(sk_sel)
+    if sem_sprint:
+        no_filtro |= mov["sk_sprint_evento"].isna()
+    mov = mov[no_filtro].copy()
+    mov["sprint"] = mov["sprint"].fillna("(fora)")
+
+    if mov.empty:
+        st.info("Sem movimentos de coluna no filtro atual.")
+    else:
+        cols = st.columns(max(1, mov["grupo"].nunique()))
+        ajuda_lote = (
+            f"Lote = mesma pessoa movendo {lote_min_cartoes} ou mais cartões "
+            f"diferentes entre colunas com intervalo de até {lote_gap_min} min "
+            "entre movimentos consecutivos. Considera só movimentos (add) em "
+            "colunas do quadro, sem [bot]/[externo]; os lotes são calculados "
+            "sobre todo o histórico, e o filtro de sprint só recorta o que é "
+            "exibido.")
+        for col, (grupo_nome, sub) in zip(cols, mov.groupby("grupo")):
+            lotes = sub[sub["em_lote"]].drop_duplicates(
+                ["pessoa", "lote"])
+            col.metric(
+                f"{grupo_nome} — movimentos em lote",
+                f"{100 * sub['em_lote'].mean():.0f}%",
+                f"{len(lotes)} lotes · maior com "
+                f"{int(sub['cartoes_no_lote'].max())} cartões",
+                delta_color="off", delta_arrow="off", help=ajuda_lote)
+
+        por_sprint = (mov.groupby(["grupo", "sprint"])
+                      .agg(movimentos=("em_lote", "size"),
+                           em_lote=("em_lote", "sum")).reset_index())
+        por_sprint["pct"] = 100 * por_sprint["em_lote"] / por_sprint["movimentos"]
+        ordem = sprints_df["sprint"].drop_duplicates().tolist() + ["(fora)"]
+        fig = px.bar(
+            por_sprint, x="sprint", y="pct", color="grupo", barmode="group",
+            custom_data=["em_lote", "movimentos"],
+            title="% dos movimentos de coluna feitos em lote, por sprint",
+            labels={"sprint": "Sprint", "pct": "% dos movimentos em lote",
+                    "grupo": "Grupo"},
+            category_orders={"sprint": ordem, "grupo": sorted(grupos_sel)})
+        fig.update_traces(
+            hovertemplate="%{y:.0f}% (%{customdata[0]} de "
+                          "%{customdata[1]} movimentos)")
+        fig.update_xaxes(type="category")
+        fig.update_yaxes(range=[0, 100])
+        st.plotly_chart(fig, use_container_width=True)
