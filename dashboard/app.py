@@ -727,25 +727,31 @@ with tab_review:
         with c1:
             fig = px.histogram(
                 merged, x="horas_para_merge", color="grupo", nbins=40,
+                barmode="group", histnorm="percent",
                 title="Distribuição do tempo até o merge (horas)",
-                labels={"horas_para_merge": "Horas", "count": "MRs",
-                        "grupo": "Grupo"})
+                labels={"horas_para_merge": "Horas", "grupo": "Grupo"})
+            fig.update_yaxes(title_text="% dos MRs do grupo")
             st.plotly_chart(fig, use_container_width=True)
         with c2:
             fig = px.histogram(
                 merged, x="comentarios", color="grupo", nbins=20,
+                barmode="group", histnorm="percent",
                 title="Comentários por MR (mesclados)",
-                labels={"comentarios": "Comentários", "count": "MRs",
-                        "grupo": "Grupo"})
+                labels={"comentarios": "Comentários", "grupo": "Grupo"})
+            fig.update_yaxes(title_text="% dos MRs do grupo")
             st.plotly_chart(fig, use_container_width=True)
 
         c3, c4 = st.columns(2)
         with c3:
-            aprov = (merged.groupby("merged_por").size()
-                     .sort_values(ascending=False).head(10).reset_index())
-            aprov.columns = ["Quem mesclou", "MRs mesclados"]
+            aprov = (merged.groupby(["merged_por", "grupo"]).size()
+                     .rename("MRs mesclados").reset_index()
+                     .rename(columns={"merged_por": "Quem mesclou",
+                                      "grupo": "Grupo"}))
+            top10 = (aprov.groupby("Quem mesclou")["MRs mesclados"].sum()
+                     .nlargest(10).index)
+            aprov = aprov[aprov["Quem mesclou"].isin(top10)]
             fig = px.bar(aprov, y="Quem mesclou", x="MRs mesclados",
-                         orientation="h",
+                         color="Grupo", orientation="h",
                          title="Top aprovadores (merged_por)")
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, use_container_width=True)
