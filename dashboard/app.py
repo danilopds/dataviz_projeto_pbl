@@ -17,6 +17,12 @@ DB = ROOT / "lakehouse" / "pbl.duckdb"
 st.set_page_config(page_title="Painel PBL", page_icon="📊", layout="wide")
 
 COLOR_BAD = "#c62828"
+# Okabe-Ito (seguro para daltonismo); um grupo mantém a mesma cor em todo o painel.
+PALETA_GRUPOS = ["#0072B2", "#E69F00", "#CC79A7", "#009E73", "#D55E00",
+                 "#56B4E9", "#F0E442", "#000000"]
+COR_COMMITS = "#4c78a8"
+COR_MRS = "#f58518"
+COR_CARTOES = "#54a24b"
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +70,8 @@ st.sidebar.title("🎯 Painel PBL")
 st.sidebar.caption("Turma T28 · Ciclo 2026-1b")
 
 todos_grupos = grupos_disponiveis()
+CORES_GRUPO = {g: PALETA_GRUPOS[i % len(PALETA_GRUPOS)]
+               for i, g in enumerate(todos_grupos)}
 grupos_sel = st.sidebar.multiselect(
     "Grupos", todos_grupos, default=todos_grupos)
 
@@ -84,33 +92,6 @@ sk_sel = sprints_df.loc[
 sk_in = ",".join(str(int(s)) for s in sk_sel) or "-999"
 sem_sprint = st.sidebar.checkbox(
     "Incluir atividade fora de sprint", value=False)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Limiares de alerta")
-st.sidebar.caption("⏱️ Ritmo")
-LIM_CRUNCH = st.sidebar.slider(
-    "% de commits nos 2 últimos dias da sprint (véspera)", 5, 80, 35)
-st.sidebar.caption("👥 Carga")
-LIM_TOP1 = st.sidebar.slider(
-    "% de commits da pessoa mais ativa", 20, 90, 45)
-LIM_GINI = st.sidebar.slider(
-    "Índice de Gini da distribuição de commits", 0.20, 0.90, 0.55)
-st.sidebar.caption("🔍 Review")
-LIM_REVIEW = st.sidebar.slider(
-    "Mediana de horas para merge", 12, 240, 72)
-LIM_SEM_COMENT = st.sidebar.slider(
-    "% de MRs mesclados sem comentários", 10, 90, 40)
-PERC_EIXO = st.sidebar.slider(
-    "Percentil máximo do eixo nos box plots", 90, 100, 95,
-    help="Corta só a visualização: MRs acima do percentil global ficam fora "
-         "do eixo. KPIs, medianas e alertas usam todos os MRs.")
-st.sidebar.caption("🧩 Quadro × Repo")
-LIM_CORR = st.sidebar.slider(
-    "Correlação quadro × repositório mínima", 0.0, 1.0, 0.5)
-LIM_CONC = st.sidebar.slider(
-    "% dos cartões da pessoa em um único tipo de trabalho", 40, 100, 70)
-MIN_CART_CONC = st.sidebar.slider(
-    "Mínimo de cartões por pessoa para avaliar concentração", 3, 30, 8)
 
 grupos_cond = f"f.grupo IN ({grupos_in})"
 
@@ -232,7 +213,44 @@ with tab_over:
     st.caption(
         "Mostra apenas exceções — vermelho = acima do limiar; amarelo = próximo "
         "(80% do limiar). Itens saudáveis entram só na contagem. "
-        "Limiares configuráveis na barra lateral.")
+        "Limiares configuráveis em cada tema.")
+
+    # (key, rótulo, mín, máx, padrão) por tema; sliders são desenhados no loop
+    # de temas, mas os valores são lidos do session_state antes dos cálculos.
+    LIMIARES = {
+        "ritmo": [
+            ("lim_crunch",
+             "% de commits nos 2 últimos dias da sprint (véspera)",
+             5, 80, 35)],
+        "carga": [
+            ("lim_top1", "% de commits da pessoa mais ativa", 20, 90, 45),
+            ("lim_gini", "Índice de Gini da distribuição de commits",
+             0.20, 0.90, 0.55)],
+        "review": [
+            ("lim_review", "Mediana de horas para merge", 12, 240, 72),
+            ("lim_sem_coment", "% de MRs mesclados sem comentários",
+             10, 90, 40)],
+        "quadro": [
+            ("lim_corr", "Correlação quadro × repositório mínima",
+             0.0, 1.0, 0.5),
+            ("lim_conc",
+             "% dos cartões da pessoa em um único tipo de trabalho",
+             40, 100, 70),
+            ("min_cart_conc",
+             "Mínimo de cartões por pessoa para avaliar concentração",
+             3, 30, 8)],
+    }
+    for specs in LIMIARES.values():
+        for chave, _, _, _, padrao in specs:
+            st.session_state.setdefault(chave, padrao)
+    LIM_CRUNCH = st.session_state["lim_crunch"]
+    LIM_TOP1 = st.session_state["lim_top1"]
+    LIM_GINI = st.session_state["lim_gini"]
+    LIM_REVIEW = st.session_state["lim_review"]
+    LIM_SEM_COMENT = st.session_state["lim_sem_coment"]
+    LIM_CORR = st.session_state["lim_corr"]
+    LIM_CONC = st.session_state["lim_conc"]
+    MIN_CART_CONC = st.session_state["min_cart_conc"]
 
     # Alerta 1 — crunch por grupo (últimos 2 dias da sprint)
     crunch_df = query(f"""
@@ -343,7 +361,7 @@ with tab_over:
                 f"{row['sprint']}: {pct}% dos commits nos 2 últimos dias "
                 f"({int(row['fim'])}/{int(row['total'])}) — {detalhe}")))
     temas.append({
-        "marker": "⏱️ Ritmo",
+        "marker": "⏱️ Ritmo", "limiares": "ritmo",
         "resumo": (f"{len(exce_ritmo)} de {n_sprints_alerta} {pal_sprint} "
                    "com véspera ou próxima do limiar" if exce_ritmo
                    else f"{n_sprints_alerta} {pal_sprint} com ritmo saudável"),
@@ -367,7 +385,7 @@ with tab_over:
     n_grupos_alerta = len(conc_df)
     pal_grupo = "grupo" if n_grupos_alerta == 1 else "grupos"
     temas.append({
-        "marker": "👥 Carga",
+        "marker": "👥 Carga", "limiares": "carga",
         "resumo": (f"{len(exce_carga)} de {n_grupos_alerta} {pal_grupo} com "
                    "carga concentrada" if exce_carga
                    else f"{n_grupos_alerta} {pal_grupo} com carga equilibrada"),
@@ -390,7 +408,7 @@ with tab_over:
     n_grupos_review = len(review_df)
     pal_grupo_review = ("grupo" if n_grupos_review == 1 else "grupos")
     temas.append({
-        "marker": "🔍 Review",
+        "marker": "🔍 Review", "limiares": "review",
         "resumo": (f"{len(exce_review)} de {n_grupos_review} "
                    f"{pal_grupo_review} em atenção na revisão" if exce_review
                    else f"{n_grupos_review} {pal_grupo_review} com revisão "
@@ -405,7 +423,7 @@ with tab_over:
                  else "warn" if abs(corr) < LIM_CORR else "ok")
         saudavel = nivel == "ok"
         temas.append({
-            "marker": "🧩 Quadro × Repo",
+            "marker": "🧩 Quadro × Repo", "limiares": "quadro",
             "resumo": (f"correlação commits × cartões fechados = {corr} — "
                        + ("quadro reflete o repositório" if saudavel
                           else "divergência quadro/repositório")),
@@ -417,7 +435,7 @@ with tab_over:
                     "pelo menos 3 sprints no recorte."})
     else:
         temas.append({
-            "marker": "🧩 Quadro × Repo",
+            "marker": "🧩 Quadro × Repo", "limiares": "quadro",
             "icon": "⚪",
             "resumo": "sem dados suficientes para correlacionar",
             "excecoes": [],
@@ -427,12 +445,17 @@ with tab_over:
 
     ICONES = {"bad": "🔴", "warn": "🟡", "ok": "🟢"}
     separar_grupos = len(grupos_sel) > 1
-    for tema in temas:
+    for i, tema in enumerate(temas):
         exce = tema["excecoes"]
         icon = (tema.get("icon")
                 or (ICONES["bad"] if any(n == "bad" for n, _, _ in exce)
                     else ICONES["warn"] if exce else ICONES["ok"]))
+        if i > 0:
+            st.divider()
         st.markdown(f"#### {tema['marker']}")
+        with st.expander("⚙️ Limiares de alerta", expanded=False):
+            for chave, rotulo, vmin, vmax, _ in LIMIARES[tema["limiares"]]:
+                st.slider(rotulo, vmin, vmax, key=chave)
         st.markdown(f"#### {icon} {tema['resumo']}")
         if tema.get("nota"):
             st.caption(tema["nota"])
@@ -511,8 +534,7 @@ with tab_ritmo:
                     / serie.groupby("grupo")["commits"].transform("sum"))
     fig = px.line(serie, x="dia", y="pct", color="grupo",
                   custom_data=["commits"],
-                  color_discrete_map={"G01": "#0072B2", "G02": "#E69F00",
-                                      "G03": "#CC79A7"},
+                  color_discrete_map=CORES_GRUPO,
                   title="Commits por dia (% do total de commits do grupo)",
                   labels={"dia": "Data", "pct": "% dos commits do grupo",
                           "grupo": "Grupo"})
@@ -546,7 +568,7 @@ with tab_ritmo:
         dist_long, x="sprint", y="pct", color="janela",
         facet_col="grupo",
         color_discrete_map={
-            "Início/meio": "#4c78a8", "Véspera (2 dias)": COLOR_BAD},
+            "Início/meio": COR_COMMITS, "Véspera (2 dias)": COLOR_BAD},
         title="% de commits por janela dentro da sprint",
         labels={"pct": "% dos commits", "sprint": "", "janela": "Janela"})
     fig.for_each_yaxis(lambda ax: ax.update(title_text="% dos commits"))
@@ -572,6 +594,9 @@ with tab_ritmo:
                     f"**{r['grupo']} · {r['sprint']}** — {r['pct_fim']}% "
                     f"dos commits ({int(r['fim'])}/{int(r['total'])}) nos "
                     f"2 últimos dias. Limiar: {LIM_CRUNCH}%.")
+        st.caption(
+            f"Limiar de véspera em uso: {LIM_CRUNCH}%. Ajuste em "
+            "🏠 Visão geral → ⏱️ Ritmo → Limiares de alerta.")
 
     fora = query(f"""
         SELECT f.grupo,
@@ -646,11 +671,11 @@ with tab_carga:
         ~visitante, foco["pessoa"] + " (de " + foco["origem"].fillna("") + ")")
     fig = go.Figure()
     fig.add_bar(name="Commits", x=foco["rotulo"], y=foco["commits"],
-                marker_color="#4c78a8")
+                marker_color=COR_COMMITS)
     fig.add_bar(name="MRs", x=foco["rotulo"], y=foco["mrs"],
-                marker_color="#f58518")
+                marker_color=COR_MRS)
     fig.add_bar(name="Cartões fechados", x=foco["rotulo"],
-                y=foco["cartoes_fechados"], marker_color="#54a24b")
+                y=foco["cartoes_fechados"], marker_color=COR_CARTOES)
     fig.update_layout(
         barmode="stack",
         title=f"Distribuição de trabalho — {grupo_foco}",
@@ -743,12 +768,18 @@ with tab_review:
         ordem_grupos = sorted(merged["grupo"].unique())
         c1, c2 = st.columns(2)
         with c1:
+            PERC_EIXO = st.slider(
+                "Percentil máximo do eixo nos box plots", 90, 100, 95,
+                help="Corta só a visualização: MRs acima do percentil global "
+                     "ficam fora do eixo. KPIs, medianas e alertas usam "
+                     "todos os MRs.")
             limite = float(merged["horas_para_merge"].quantile(PERC_EIXO / 100))
             fig = px.box(
                 merged, x="horas_para_merge", y="grupo", color="grupo",
                 points="outliers",
                 title="Tempo até o merge por grupo (horas)",
                 labels={"horas_para_merge": "Horas", "grupo": "Grupo"},
+                color_discrete_map=CORES_GRUPO,
                 category_orders={"grupo": ordem_grupos})
             fig.update_traces(boxmean=True)
             fig.update_xaxes(range=[0, limite * 1.05])
@@ -774,6 +805,7 @@ with tab_review:
                 title="Comentários por MR (mesclados)",
                 labels={"faixa": "Comentários", "pct": "% dos MRs do grupo",
                         "grupo": "Grupo"},
+                color_discrete_map=CORES_GRUPO,
                 category_orders={"faixa": faixas, "grupo": ordem_grupos})
             fig.update_traces(
                 hovertemplate="%{y:.1f}% (%{customdata[0]} MRs)")
@@ -792,6 +824,8 @@ with tab_review:
             aprov = aprov[aprov["Quem mesclou"].isin(top10)]
             fig = px.bar(aprov, y="Quem mesclou", x="MRs mesclados",
                          color="Grupo", orientation="h",
+                         color_discrete_map=CORES_GRUPO,
+                         category_orders={"Grupo": sorted(grupos_sel)},
                          title="Top aprovadores (merged_por)")
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, use_container_width=True)
@@ -918,9 +952,9 @@ with tab_quadro:
     else:
         fig = go.Figure()
         fig.add_bar(name="Cartões fechados", x=qxr["grupo"] + " · " + qxr["sprint"],
-                    y=qxr["cartoes_fechados"], marker_color="#54a24b")
+                    y=qxr["cartoes_fechados"], marker_color=COR_CARTOES)
         fig.add_bar(name="Commits", x=qxr["grupo"] + " · " + qxr["sprint"],
-                    y=qxr["commits"], marker_color="#4c78a8")
+                    y=qxr["commits"], marker_color=COR_COMMITS)
         fig.update_layout(
             barmode="group",
             title="Cartões fechados × commits por sprint",
@@ -945,6 +979,9 @@ with tab_quadro:
                     f"— quadro e repositório caminham juntos.")
         else:
             st.info("Menos de 3 sprints no recorte — correlação não calculada.")
+        st.caption(
+            f"Correlação mínima em uso: {LIM_CORR}. Ajuste em "
+            "🏠 Visão geral → 🧩 Quadro × Repo → Limiares de alerta.")
 
         st.caption(
             "Como ler: sprints com muitos commits e poucos cartões fechados "
@@ -956,6 +993,10 @@ with tab_quadro:
     # ---------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Alguém está concentrado em um tipo de tarefa?")
+    st.caption(
+        f"Limiares em uso: concentração acima de {LIM_CONC}% em um tipo; "
+        f"mínimo de {MIN_CART_CONC} cartões por pessoa. Ajuste em "
+        "🏠 Visão geral → 🧩 Quadro × Repo → Limiares de alerta.")
 
     tipo_por_rotulo = {
         "DOCUMENTATION": "Documentação", "CODE": "Código",
@@ -1103,6 +1144,7 @@ with tab_quadro:
             title="% dos movimentos de coluna feitos em lote, por sprint",
             labels={"sprint": "Sprint", "pct": "% dos movimentos em lote",
                     "grupo": "Grupo"},
+            color_discrete_map=CORES_GRUPO,
             category_orders={"sprint": ordem, "grupo": sorted(grupos_sel)})
         fig.update_traces(
             hovertemplate="%{y:.0f}% (%{customdata[0]} de "
