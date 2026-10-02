@@ -100,6 +100,10 @@ LIM_REVIEW = st.sidebar.slider(
     "Mediana de horas para merge", 12, 240, 72)
 LIM_SEM_COMENT = st.sidebar.slider(
     "% de MRs mesclados sem comentários", 10, 90, 40)
+PERC_EIXO = st.sidebar.slider(
+    "Percentil máximo do eixo nos box plots", 90, 100, 95,
+    help="Corta só a visualização: MRs acima do percentil global ficam fora "
+         "do eixo. KPIs, medianas e alertas usam todos os MRs.")
 st.sidebar.caption("🧩 Quadro × Repo")
 LIM_CORR = st.sidebar.slider(
     "Correlação quadro × repositório mínima", 0.0, 1.0, 0.5)
@@ -723,22 +727,45 @@ with tab_review:
         k4.metric("Sem comentários",
                   f"{100 * (merged['comentarios'] == 0).mean():.0f}%")
 
+        ordem_grupos = sorted(merged["grupo"].unique())
         c1, c2 = st.columns(2)
         with c1:
-            fig = px.histogram(
-                merged, x="horas_para_merge", color="grupo", nbins=40,
-                barmode="group", histnorm="percent",
-                title="Distribuição do tempo até o merge (horas)",
-                labels={"horas_para_merge": "Horas", "grupo": "Grupo"})
-            fig.update_yaxes(title_text="% dos MRs do grupo")
+            limite = float(merged["horas_para_merge"].quantile(PERC_EIXO / 100))
+            fig = px.box(
+                merged, x="horas_para_merge", y="grupo", color="grupo",
+                points="outliers",
+                title="Tempo até o merge por grupo (horas)",
+                labels={"horas_para_merge": "Horas", "grupo": "Grupo"},
+                category_orders={"grupo": ordem_grupos})
+            fig.update_traces(boxmean=True)
+            fig.update_xaxes(range=[0, limite * 1.05])
+            fig.update_layout(showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
+            fora = int((merged["horas_para_merge"] > limite).sum())
+            st.caption(
+                f"Eixo até o percentil {PERC_EIXO} global ({limite:.1f} h); "
+                f"{fora} de {len(merged)} MRs ficam fora do eixo. "
+                "Linha tracejada = média.")
         with c2:
-            fig = px.histogram(
-                merged, x="comentarios", color="grupo", nbins=20,
-                barmode="group", histnorm="percent",
+            faixas = ["0", "1", "2", "3", "4", "5+"]
+            dist = merged.assign(
+                faixa=merged["comentarios"].map(
+                    lambda n: "5+" if n >= 5 else str(int(n))))
+            dist = (dist.groupby(["grupo", "faixa"]).size()
+                    .rename("mrs").reset_index())
+            dist["pct"] = (100 * dist["mrs"]
+                           / dist.groupby("grupo")["mrs"].transform("sum"))
+            fig = px.bar(
+                dist, x="faixa", y="pct", color="grupo", barmode="group",
+                custom_data=["mrs"],
                 title="Comentários por MR (mesclados)",
-                labels={"comentarios": "Comentários", "grupo": "Grupo"})
-            fig.update_yaxes(title_text="% dos MRs do grupo")
+                labels={"faixa": "Comentários", "pct": "% dos MRs do grupo",
+                        "grupo": "Grupo"},
+                category_orders={"faixa": faixas, "grupo": ordem_grupos})
+            fig.update_traces(
+                hovertemplate="%{y:.1f}% (%{customdata[0]} MRs)")
+            # Sem isso o Plotly infere eixo numérico ("0".."4") e descarta "5+".
+            fig.update_xaxes(type="category")
             st.plotly_chart(fig, use_container_width=True)
 
         c3, c4 = st.columns(2)
