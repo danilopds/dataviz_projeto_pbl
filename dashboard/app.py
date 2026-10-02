@@ -223,22 +223,16 @@ with tab_over:
              "% de commits nos 2 últimos dias da sprint (véspera)",
              5, 80, 35)],
         "carga": [
-            ("lim_top1", "% de commits da pessoa mais ativa", 20, 90, 45),
+            ("lim_top1", "% de commits da pessoa mais ativa", 20, 90, 25),
             ("lim_gini", "Índice de Gini da distribuição de commits",
-             0.20, 0.90, 0.55)],
+             0.20, 0.90, 0.35)],
         "review": [
-            ("lim_review", "Mediana de horas para merge", 12, 240, 72),
+            ("lim_review", "Mediana de horas para merge", 1, 24, 5),
             ("lim_sem_coment", "% de MRs mesclados sem comentários",
              10, 90, 40)],
         "quadro": [
             ("lim_corr", "Correlação quadro × repositório mínima",
-             0.0, 1.0, 0.5),
-            ("lim_conc",
-             "% dos cartões da pessoa em um único tipo de trabalho",
-             40, 100, 70),
-            ("min_cart_conc",
-             "Mínimo de cartões por pessoa para avaliar concentração",
-             3, 30, 8)],
+             0.0, 1.0, 0.8)],
     }
     for specs in LIMIARES.values():
         for chave, _, _, _, padrao in specs:
@@ -249,8 +243,6 @@ with tab_over:
     LIM_REVIEW = st.session_state["lim_review"]
     LIM_SEM_COMENT = st.session_state["lim_sem_coment"]
     LIM_CORR = st.session_state["lim_corr"]
-    LIM_CONC = st.session_state["lim_conc"]
-    MIN_CART_CONC = st.session_state["min_cart_conc"]
 
     # Alerta 1 — crunch por grupo (últimos 2 dias da sprint)
     crunch_df = query(f"""
@@ -363,7 +355,7 @@ with tab_over:
     temas.append({
         "marker": "⏱️ Ritmo", "limiares": "ritmo",
         "resumo": (f"{len(exce_ritmo)} de {n_sprints_alerta} {pal_sprint} "
-                   "com véspera ou próxima do limiar" if exce_ritmo
+                   "acumuladas com véspera ou próxima do limiar" if exce_ritmo
                    else f"{n_sprints_alerta} {pal_sprint} com ritmo saudável"),
         "excecoes": exce_ritmo, "agrupar": True,
         "nota": "Participação dos 2 últimos dias da sprint (véspera) no total "
@@ -574,29 +566,28 @@ with tab_ritmo:
     fig.for_each_yaxis(lambda ax: ax.update(title_text="% dos commits"))
     st.plotly_chart(fig, use_container_width=True)
 
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        tabela = dist_df.rename(columns={
-            "grupo": "Grupo", "sprint": "Sprint", "total": "Commits",
-            "fim": "Véspera", "inicio_meio": "Início/meio",
-            "pct_fim": "% véspera", "pct_inicio_meio": "% início/meio"})
-        st.dataframe(
-            tabela[["Grupo", "Sprint", "Commits", "% início/meio",
-                    "% véspera"]],
-            use_container_width=True, hide_index=True)
-    with c2:
-        acima = dist_df[dist_df["pct_fim"] > LIM_CRUNCH]
-        if acima.empty:
-            st.success("Nenhum sprint acima do limiar de véspera.")
-        else:
-            for _, r in acima.iterrows():
-                st.error(
-                    f"**{r['grupo']} · {r['sprint']}** — {r['pct_fim']}% "
-                    f"dos commits ({int(r['fim'])}/{int(r['total'])}) nos "
-                    f"2 últimos dias. Limiar: {LIM_CRUNCH}%.")
-        st.caption(
-            f"Limiar de véspera em uso: {LIM_CRUNCH}%. Ajuste em "
-            "🏠 Visão geral → ⏱️ Ritmo → Limiares de alerta.")
+    st.markdown("**Tabela de distribuição de commits por janela**")
+    tabela = dist_df.rename(columns={
+        "grupo": "Grupo", "sprint": "Sprint", "total": "Commits",
+        "fim": "Véspera", "inicio_meio": "Início/meio",
+        "pct_fim": "% véspera", "pct_inicio_meio": "% início/meio"})
+    st.dataframe(
+        tabela[["Grupo", "Sprint", "Commits", "% início/meio",
+                "% véspera"]],
+        use_container_width=True, hide_index=True)
+
+    acima = dist_df[dist_df["pct_fim"] > LIM_CRUNCH]
+    if acima.empty:
+        st.success("Nenhum sprint acima do limiar de véspera.")
+    else:
+        for _, r in acima.iterrows():
+            st.error(
+                f"**{r['grupo']} · {r['sprint']}** — {r['pct_fim']}% "
+                f"dos commits ({int(r['fim'])}/{int(r['total'])}) nos "
+                f"2 últimos dias. Limiar: {LIM_CRUNCH}%.")
+    st.caption(
+        f"Limiar de véspera em uso: {LIM_CRUNCH}%. Ajuste em "
+        "🏠 Visão geral → ⏱️ Ritmo → Limiares de alerta.")
 
     fora = query(f"""
         SELECT f.grupo,
@@ -766,13 +757,14 @@ with tab_review:
                   f"{100 * (merged['comentarios'] == 0).mean():.0f}%")
 
         ordem_grupos = sorted(merged["grupo"].unique())
+        s1, _ = st.columns(2)
+        PERC_EIXO = s1.slider(
+            "Percentil máximo do eixo nos box plots", 90, 100, 95,
+            help="Corta só a visualização: MRs acima do percentil global "
+                 "ficam fora do eixo. KPIs, medianas e alertas usam "
+                 "todos os MRs.")
         c1, c2 = st.columns(2)
         with c1:
-            PERC_EIXO = st.slider(
-                "Percentil máximo do eixo nos box plots", 90, 100, 95,
-                help="Corta só a visualização: MRs acima do percentil global "
-                     "ficam fora do eixo. KPIs, medianas e alertas usam "
-                     "todos os MRs.")
             limite = float(merged["horas_para_merge"].quantile(PERC_EIXO / 100))
             fig = px.box(
                 merged, x="horas_para_merge", y="grupo", color="grupo",
@@ -993,10 +985,13 @@ with tab_quadro:
     # ---------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Alguém está concentrado em um tipo de tarefa?")
-    st.caption(
-        f"Limiares em uso: concentração acima de {LIM_CONC}% em um tipo; "
-        f"mínimo de {MIN_CART_CONC} cartões por pessoa. Ajuste em "
-        "🏠 Visão geral → 🧩 Quadro × Repo → Limiares de alerta.")
+    s1, s2 = st.columns(2)
+    LIM_CONC = s1.slider(
+        "% dos cartões da pessoa em um único tipo de trabalho",
+        40, 100, 52)
+    MIN_CART_CONC = s2.slider(
+        "Mínimo de cartões por pessoa para avaliar concentração",
+        3, 30, 9)
 
     tipo_por_rotulo = {
         "DOCUMENTATION": "Documentação", "CODE": "Código",
