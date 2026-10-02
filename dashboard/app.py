@@ -707,13 +707,22 @@ with tab_carga:
 # =========================================================================
 with tab_review:
     st.subheader("Como está o code review?")
+    incluir_ph_review = st.toggle(
+        "Incluir placeholders ([bot]/[externo])", value=False, key="ph_review",
+        help="Desligado: exclui MRs cujo autor ou quem mesclou é placeholder, "
+             "e commits de merge de placeholders.")
+    ph_mr = ("0 = 0" if incluir_ph_review else
+             "coalesce(p.eh_placeholder, 0) = 0 "
+             "AND coalesce(pm.eh_placeholder, 0) = 0")
+    ph_commit = ("0 = 0" if incluir_ph_review else
+                 "coalesce(pa.eh_placeholder, 0) = 0")
 
     merged = query(f"""
         SELECT f.*, p.pessoa_id AS autor, pm.pessoa_id AS merged_por
         FROM fato_merge_requests f
         LEFT JOIN dim_pessoa p ON p.sk_pessoa = f.sk_autor
         LEFT JOIN dim_pessoa pm ON pm.sk_pessoa = f.sk_merged_por
-        WHERE {grupos_cond} AND f.situacao = 'merged'
+        WHERE {grupos_cond} AND f.situacao = 'merged' AND ({ph_mr})
           AND {sprint_cond('f.sk_sprint')}
     """)
 
@@ -790,7 +799,8 @@ with tab_review:
                        count(*) AS merge_commits
                 FROM fato_commits f
                 LEFT JOIN dim_sprint s ON s.sk_sprint = f.sk_sprint_commitado
-                WHERE {grupos_cond} AND f.e_merge = 1
+                LEFT JOIN dim_pessoa pa ON pa.sk_pessoa = f.sk_autor
+                WHERE {grupos_cond} AND f.e_merge = 1 AND {ph_commit}
                   AND {sprint_cond('f.sk_sprint_commitado')}
                 GROUP BY 1, 2
             """)
